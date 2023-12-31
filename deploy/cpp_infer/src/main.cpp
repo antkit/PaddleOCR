@@ -174,9 +174,14 @@ void structure(std::vector<cv::String> &cv_all_img_names) {
   }
 }
 
+extern int run_workers();
+
 int main(int argc, char **argv) {
   // Parsing command-line
   google::ParseCommandLineFlags(&argc, &argv, true);
+  if (FLAGS_worker_mode) {
+      return run_workers();
+  }
   check_params();
 
   if (!Utility::PathExists(FLAGS_image_dir)) {

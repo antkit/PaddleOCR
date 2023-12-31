@@ -74,3 +74,12 @@ DEFINE_bool(rec, true, "Whether use rec in forward.");
 DEFINE_bool(cls, false, "Whether use cls in forward.");
 DEFINE_bool(table, false, "Whether use table structure in forward.");
 DEFINE_bool(layout, false, "Whether use layout analysis in forward.");
+
+// worker related
+DEFINE_bool(worker_mode, false, "");
+DEFINE_string(models_dir, "./models", "");
+DEFINE_string(lang, "ch", "");
+DEFINE_int32(x, 0, "");
+DEFINE_int32(y, 0, "");
+DEFINE_int32(w, 0, "");
+DEFINE_int32(h, 0, "");
