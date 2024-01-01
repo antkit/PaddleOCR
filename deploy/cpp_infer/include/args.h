@@ -69,6 +69,7 @@ DECLARE_bool(layout);
 // worker related
 DECLARE_bool(worker_mode);
 DECLARE_string(models_dir);
+DECLARE_string(task);
 DECLARE_string(lang);
 DECLARE_int32(x);
 DECLARE_int32(y);
