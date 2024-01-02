@@ -80,7 +80,3 @@ DEFINE_bool(worker_mode, false, "");
 DEFINE_string(models_dir, "./models", "");
 DEFINE_string(task, "", "");
 DEFINE_string(lang, "ch", "");
-DEFINE_int32(x, 0, "");
-DEFINE_int32(y, 0, "");
-DEFINE_int32(w, 0, "");
-DEFINE_int32(h, 0, "");
