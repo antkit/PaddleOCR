@@ -22,6 +22,15 @@ struct OcrTask {
   std::string img;
 };
 
+struct LocateTask {
+  LocateTask();
+
+  std::vector<std::string> images;
+  std::vector<int> region; // screen region
+  float scale; // scale the image on screen region
+  float confidence;
+};
+
 class Worker {
 public:
   Worker();
@@ -32,6 +41,8 @@ public:
 
 protected:
   void do_execute(const std::string& id, const OcrTask& task);
+  void do_execute(const std::string& id, const LocateTask& task);
+
   void print_result(const std::string& id, bool success, const std::vector<PaddleOCR::OCRPredictResult>& ocr_result);
 
 private:

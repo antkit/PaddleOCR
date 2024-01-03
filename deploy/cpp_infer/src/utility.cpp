@@ -61,8 +61,8 @@ void Utility::VisualizeBboxes(const cv::Mat &srcimg,
   }
 
   cv::imwrite(save_path, img_vis);
-  std::cout << "The detection visualized image saved in " + save_path
-            << std::endl;
+  //std::cout << "The detection visualized image saved in " + save_path
+  //          << std::endl;
 }
 
 void Utility::VisualizeBboxes(const cv::Mat &srcimg,
