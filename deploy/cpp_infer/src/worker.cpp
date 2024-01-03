@@ -122,12 +122,13 @@ void from_json(const json& j, OcrTask& t) {
 }
 
 void from_json(const json& j, LocateTask& t) {
+  j.at("images").get_to(t.images);
   j.at("region").get_to(t.region);
   if (j.contains("scale")) {
     j.at("scale").get_to(t.scale);
   }
   if (j.contains("confidence")) {
-    j.at("confidence").get_to(t.scale);
+    j.at("confidence").get_to(t.confidence);
   }
 }
 
@@ -207,7 +208,7 @@ void Worker::do_execute(const std::string& id, const OcrTask& task) {
       for (std::vector<std::vector<int>>::iterator p2 = p->box.begin(); p2 != p->box.end(); ++p2) {
         std::transform(p2->cbegin(), p2->cend(), p2->begin(), [task](int v) {
           return int(std::round(v / task.scale));
-        });
+          });
       }
     }
   }
@@ -227,6 +228,9 @@ void Worker::do_execute(const std::string& id, const OcrTask& task) {
 }
 
 void Worker::do_execute(const std::string& id, const LocateTask& task) {
+  // TODO support task.grayscale
+  std::cout << "executing locate task" << std::endl;
+
   // TODO deal with w=0 and h=0
   cv::Mat img_with_alpha = captureScreenMat(task.region[0], task.region[1], task.region[2], task.region[3]);
   if (!img_with_alpha.data) {
@@ -239,8 +243,9 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
     return;
   }
 
+  bool with_scale = std::abs(task.scale - 1.0) > 0.0001;
   cv::Mat img = cv::Mat();
-  if (std::abs(task.scale - 1.0) > 0.0001) {
+  if (with_scale) {
     auto new_size = cv::Size(int(img_with_alpha.cols * task.scale), int(img_with_alpha.rows * task.scale));
     cv::Mat scaled = cv::Mat();
     cv::resize(img_with_alpha, scaled, new_size);
@@ -250,30 +255,48 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
     cv::cvtColor(img_with_alpha, img, cv::COLOR_BGRA2BGR);
   }
 
-  for (std::vector<std::string>::const_iterator p = task.images.begin(); p != task.images.end(); ++p) {
-    auto templ = cv::imread(*p, cv::IMREAD_COLOR); // cv::IMREAD_GRAYSCALE
-    auto match_method = cv::TemplateMatchModes::TM_CCORR_NORMED;
-    cv::Mat result(cv::Size(img.cols - templ.cols + 1, img.rows - templ.rows + 1), CV_32FC1);
+  for (size_t i = 0; i < task.images.size(); i++) {
+    std::cerr << "imread template " << task.images[i] << std::endl;
+    auto templ = cv::imread(task.images[i], cv::IMREAD_COLOR); // cv::IMREAD_GRAYSCALE
+    // TM_CCOEFF_NORMED's range(-1, 1), and the best matching is maxLoc
+    auto match_method = cv::TemplateMatchModes::TM_CCOEFF_NORMED; // TM_CCORR_NORMED;
+    cv::Mat result;// (cv::Size(img.cols - templ.cols + 1, img.rows - templ.rows + 1), CV_32FC1);
     cv::matchTemplate(img, templ, result, match_method);
+    //std::cerr << "matchTemplate finished " << std::endl;
 
-    normalize(result, result, 0, 1, cv::NORM_MINMAX, -1, cv::Mat());
-    double minVal;
-    double maxVal;
-    cv::Point minLoc;
-    cv::Point maxLoc;
-    cv::Point matchLoc;
+    double minVal, maxVal;
+    cv::Point minLoc, maxLoc;
+    //normalize(result, result, 0, 1, cv::NORM_MINMAX, -1, cv::Mat());
     cv::minMaxLoc(result, &minVal, &maxVal, &minLoc, &maxLoc, cv::Mat());
-    if (match_method == cv::TemplateMatchModes::TM_SQDIFF || match_method == cv::TemplateMatchModes::TM_SQDIFF_NORMED) {
-      matchLoc = minLoc;
+    std::cerr << "minVal: " << minVal << ", maxVal: " << maxVal << ", required: " << task.confidence << std::endl;
+    //cv::rectangle(img_with_alpha, maxLoc, cv::Point(maxLoc.x + templ.cols, maxLoc.y + templ.rows), cv::Scalar::all(0), 2, 8, 0);
+    //cv::rectangle(img, maxLoc, cv::Point(maxLoc.x + templ.cols, maxLoc.y + templ.rows), cv::Scalar::all(255), 2, 8, 0);
+    //cv::rectangle(result, maxLoc, cv::Point(maxLoc.x + templ.cols, maxLoc.y + templ.rows), cv::Scalar::all(0), 2, 8, 0);
+    //cv::imwrite(FLAGS_output + "/locate_screen.png", img_with_alpha);
+    //cv::imwrite(FLAGS_output + "/locate_screen_scaled.png", img);
+    //cv::imwrite(FLAGS_output + "/locate_result.png", result);
+
+    if ((maxVal + 1) / 2 >= task.confidence) {
+      json result = {
+        int(i),
+        task.region[0] + (with_scale ? int(maxLoc.x / task.scale) : maxLoc.x),
+        task.region[1] + (with_scale ? int(maxLoc.y / task.scale) : maxLoc.y),
+        with_scale ? int(templ.rows / task.scale) : templ.rows,
+        with_scale ? int(templ.cols / task.scale) : templ.cols
+      };
+      json j = json();
+      j["id"] = id;
+      j["success"] = true;
+      j["content"] = result.dump();
+      std::cout << j.dump() << std::endl;
+      return;
     }
-    else {
-      matchLoc = maxLoc;
-    }
-    //rectangle(img_display, matchLoc, Point(matchLoc.x + templ.cols, matchLoc.y + templ.rows), Scalar::all(0), 2, 8, 0);
-    //rectangle(result, matchLoc, Point(matchLoc.x + templ.cols, matchLoc.y + templ.rows), Scalar::all(0), 2, 8, 0);
-    //imshow(image_window, img_display);
-    //imshow(result_window, result);
   }
+  json j = json();
+  j["id"] = id;
+  j["success"] = false;
+  j["content"] = "locate failed";
+  std::cout << j.dump() << std::endl;
 }
 
 void Worker::print_result(const std::string& id, bool success, const std::vector<PaddleOCR::OCRPredictResult>& ocr_result) {
