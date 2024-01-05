@@ -179,7 +179,7 @@ extern int run_workers();
 int main(int argc, char **argv) {
   // Parsing command-line
   google::ParseCommandLineFlags(&argc, &argv, true);
-  if (FLAGS_worker_mode) {
+  if (FLAGS_workers_num > 0) {
       return run_workers();
   }
   check_params();

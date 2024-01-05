@@ -6,7 +6,7 @@
 struct Task {
   std::string id;
   std::string command;
-  std::string created_at;
+  //std::string created_at;
   std::string content;
 };
 
@@ -43,9 +43,12 @@ protected:
   void do_execute(const std::string& id, const OcrTask& task);
   void do_execute(const std::string& id, const LocateTask& task);
 
+  void print_result(const std::string& id, bool success, const std::string& content);
   void print_result(const std::string& id, bool success, const std::vector<PaddleOCR::OCRPredictResult>& ocr_result);
 
 private:
   std::map<std::string, std::shared_ptr<PaddleOCR::PPOCR>> ppocrs_;
   std::map<std::string, std::shared_ptr<PaddleOCR::PaddleStructure>> ps_engines_;
+
+  static std::mutex output_mutex_;
 };

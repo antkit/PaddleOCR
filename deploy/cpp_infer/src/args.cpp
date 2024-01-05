@@ -76,7 +76,7 @@ DEFINE_bool(table, false, "Whether use table structure in forward.");
 DEFINE_bool(layout, false, "Whether use layout analysis in forward.");
 
 // worker related
-DEFINE_bool(worker_mode, false, "");
 DEFINE_string(models_dir, "./models", "");
+DEFINE_int32(workers_num, 0, "");
 DEFINE_string(task, "", "");
 DEFINE_string(lang, "ch", "");

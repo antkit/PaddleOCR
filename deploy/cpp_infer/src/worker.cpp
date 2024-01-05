@@ -51,12 +51,6 @@ cv::Mat captureScreenMat(int x, int y, int width, int height)
   HDC hwindowDC = GetDC(hwnd);
   HDC hwindowCompatibleDC = CreateCompatibleDC(hwindowDC);
 
-  // define scale, height and width
-  //int screenx = GetSystemMetrics(SM_XVIRTUALSCREEN);
-  //int screeny = GetSystemMetrics(SM_YVIRTUALSCREEN);
-  //int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-  //int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-
   // create a bitmap
   HBITMAP hbwindow = CreateCompatibleBitmap(hwindowDC, width, height);
   BITMAPINFOHEADER bi;
@@ -132,6 +126,8 @@ void from_json(const json& j, LocateTask& t) {
   }
 }
 
+std::mutex Worker::output_mutex_;
+
 // FLAGS_* are used in:
 //  - PPOCR::PPOCR, PPOCR::benchmark_log
 //  - PaddleStructure::PaddleStructure, PaddleStructure::benchmark_log
@@ -151,6 +147,7 @@ void Worker::execute(const Task& task) {
   auto j = json::parse(task.content, nullptr, false);
   if (j.is_discarded()) {
     std::cerr << "invalid task content" << std::endl;
+    print_result(task.id, false, "invalid task content");
     return;
   }
   //std::cerr << "parsed content" << std::endl;
@@ -169,12 +166,10 @@ void Worker::execute(const Task& task) {
 
 void Worker::do_execute(const std::string& id, const OcrTask& task) {
   if (ppocrs_.find(task.lang) == ppocrs_.end()) {
+    // TODO initialize PPOCR with task.lang
     ppocrs_[task.lang] = std::shared_ptr<PPOCR>(new PPOCR());
   }
   std::shared_ptr<PPOCR> ppocr = ppocrs_[task.lang];
-  if (!ppocr) {
-    ppocr = std::shared_ptr<PPOCR>(new PPOCR());
-  }
 
   if (FLAGS_benchmark) {
     ppocr->reset_timer();
@@ -184,7 +179,7 @@ void Worker::do_execute(const std::string& id, const OcrTask& task) {
   cv::Mat img_with_alpha = captureScreenMat(task.region[0], task.region[1], task.region[2], task.region[3]);
   if (!img_with_alpha.data) {
     std::cerr << "[ERROR] screenshot invalid data" << std::endl;
-    print_result(id, false, std::vector<OCRPredictResult>());
+    print_result(id, false, "[]");
     return;
   }
   //cv::imwrite(FLAGS_output + "/screenshot.png", img_with_alpha);
@@ -229,17 +224,13 @@ void Worker::do_execute(const std::string& id, const OcrTask& task) {
 
 void Worker::do_execute(const std::string& id, const LocateTask& task) {
   // TODO support task.grayscale
-  std::cout << "executing locate task" << std::endl;
+  //std::cerr << "executing locate task" << std::endl;
 
   // TODO deal with w=0 and h=0
   cv::Mat img_with_alpha = captureScreenMat(task.region[0], task.region[1], task.region[2], task.region[3]);
   if (!img_with_alpha.data) {
     std::cerr << "[ERROR] screenshot invalid data" << std::endl;
-    json j = json();
-    j["id"] = id;
-    j["success"] = false;
-    j["content"] = "{}";
-    std::cout << j.dump() << std::endl;
+    print_result(id, false, "capture screen failed");
     return;
   }
 
@@ -256,7 +247,7 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
   }
 
   for (size_t i = 0; i < task.images.size(); i++) {
-    std::cerr << "imread template " << task.images[i] << std::endl;
+    //std::cerr << "imread template " << task.images[i] << std::endl;
     auto templ = cv::imread(task.images[i], cv::IMREAD_COLOR); // cv::IMREAD_GRAYSCALE
     // TM_CCOEFF_NORMED's range(-1, 1), and the best matching is maxLoc
     auto match_method = cv::TemplateMatchModes::TM_CCOEFF_NORMED; // TM_CCORR_NORMED;
@@ -266,9 +257,9 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
 
     double minVal, maxVal;
     cv::Point minLoc, maxLoc;
-    //normalize(result, result, 0, 1, cv::NORM_MINMAX, -1, cv::Mat());
     cv::minMaxLoc(result, &minVal, &maxVal, &minLoc, &maxLoc, cv::Mat());
-    std::cerr << "minVal: " << minVal << ", maxVal: " << maxVal << ", required: " << task.confidence << std::endl;
+    //std::cerr << "minVal: " << minVal << ", maxVal: " << maxVal << ", required: " << task.confidence << std::endl;
+
     //cv::rectangle(img_with_alpha, maxLoc, cv::Point(maxLoc.x + templ.cols, maxLoc.y + templ.rows), cv::Scalar::all(0), 2, 8, 0);
     //cv::rectangle(img, maxLoc, cv::Point(maxLoc.x + templ.cols, maxLoc.y + templ.rows), cv::Scalar::all(255), 2, 8, 0);
     //cv::rectangle(result, maxLoc, cv::Point(maxLoc.x + templ.cols, maxLoc.y + templ.rows), cv::Scalar::all(0), 2, 8, 0);
@@ -284,19 +275,25 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
         with_scale ? int(templ.rows / task.scale) : templ.rows,
         with_scale ? int(templ.cols / task.scale) : templ.cols
       };
-      json j = json();
-      j["id"] = id;
-      j["success"] = true;
-      j["content"] = result.dump();
-      std::cout << j.dump() << std::endl;
+      print_result(id, true, result.dump());
       return;
     }
   }
+  print_result(id, false, "locate failed");
+}
+
+void Worker::print_result(const std::string& id, bool success, const std::string& content) {
   json j = json();
   j["id"] = id;
-  j["success"] = false;
-  j["content"] = "locate failed";
-  std::cout << j.dump() << std::endl;
+  j["success"] = success;
+  j["content"] = content;
+  //std::cout << j.dump() << std::endl;
+
+  std::ostringstream stream;
+  stream << '\n' << j.dump(); // enforce start a new line
+
+  std::lock_guard<std::mutex> lock(output_mutex_);
+  std::cout << stream.str() << std::endl; // flush with endl
 }
 
 void Worker::print_result(const std::string& id, bool success, const std::vector<PaddleOCR::OCRPredictResult>& ocr_result) {
@@ -312,11 +309,7 @@ void Worker::print_result(const std::string& id, bool success, const std::vector
       {"confidence", p->score},
       });
   }
-  json j = json();
-  j["id"] = id;
-  j["success"] = success;
-  j["content"] = ocr_texts.dump();
-  std::cout << j.dump() << std::endl;
+  print_result(id, success, ocr_texts.dump());
 }
 
 class WorkerManager {
@@ -330,9 +323,9 @@ public:
   }
 
   void run() {
-    std::cout << "WorkerManager::run" << std::endl;
+    std::cerr << "Runing with " << FLAGS_workers_num << " workers" << std::endl;
     stop_ = false;
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < FLAGS_workers_num; i++) {
       std::thread t(&WorkerManager::do_run, this);
       t.detach();
     }
@@ -346,11 +339,11 @@ public:
 protected:
   void do_run() {
     using namespace std::chrono_literals;
-    std::cout << "WorkerManager::do_run" << std::endl;
+    //std::cerr << "WorkerManager::do_run" << std::endl;
 
     Worker worker;
     while (!stop_) {
-      //std::cout << "WorkerManager::do_run checking task deque" << std::endl;
+      //std::cerr << "WorkerManager::do_run checking task deque" << std::endl;
       std::shared_ptr<Task> task;
       {
         std::lock_guard<std::mutex> scoped_lock(task_locker_);
@@ -400,11 +393,11 @@ int run_workers() {
     }
 
     if (FLAGS_visualize) {
-      std::cerr << "LINE: [" << line << "]" << std::endl;
+      //std::cerr << "LINE: " << line << std::endl;
     }
     auto j = json::parse(line, nullptr, false);
     if (j.is_discarded() || !j.contains("command")) {
-      std::cerr << "unknown task" << std::endl;
+      std::cerr << "unknown task: " << j.dump() << std::endl;
       continue;
     }
 
@@ -423,39 +416,6 @@ int run_workers() {
     }
     wm.add_task(task);
   }
-
-  //Worker worker;
-  //while (true) {
-  //  std::string line;
-  //  if (!std::getline(std::cin, line)) {
-  //    //std::cerr << "FAILED to getline" << std::endl;
-  //    std::this_thread::sleep_for(10ms);
-  //    continue;
-  //  }
-
-  //  if (FLAGS_visualize) {
-  //    std::cerr << "LINE: [" << line << "]" << std::endl;
-  //  }
-  //  auto j = json::parse(line, nullptr, false);
-  //  if (j.is_discarded() || !j.contains("command")) {
-  //    std::cerr << "unknown task" << std::endl;
-  //    continue;
-  //  }
-
-  //  Task task;
-  //  try {
-  //    task = j.get<Task>();
-  //  }
-  //  catch (...) {
-  //    std::cerr << "illegal task format" << std::endl;
-  //    continue;
-  //  }
-
-  //  if (task.command == "DONE") {
-  //    break;
-  //  }
-  //  worker.execute(task);
-  //}
 
   std::cerr << "quiting..." << std::endl;
   return 0;
