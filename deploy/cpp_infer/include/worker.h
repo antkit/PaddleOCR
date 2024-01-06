@@ -31,6 +31,11 @@ struct LocateTask {
   float confidence;
 };
 
+struct PixelTask {
+  int x;
+  int y;
+};
+
 class Worker {
 public:
   Worker();
@@ -40,8 +45,11 @@ public:
   void execute(const Task& task);
 
 protected:
+  std::shared_ptr<PaddleOCR::PPOCR> ppocr_by_lang(const std::string& lang);
+
   void do_execute(const std::string& id, const OcrTask& task);
   void do_execute(const std::string& id, const LocateTask& task);
+  void do_execute(const std::string& id, const PixelTask& task);
 
   void print_result(const std::string& id, bool success, const std::string& content);
   void print_result(const std::string& id, bool success, const std::vector<PaddleOCR::OCRPredictResult>& ocr_result);

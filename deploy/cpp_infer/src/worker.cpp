@@ -16,6 +16,64 @@
 using json = nlohmann::json;
 using namespace PaddleOCR;
 
+struct PaddleResource {
+  PaddleResource() {}
+  PaddleResource(const std::string& m, const std::string& r, const std::string& d)
+    : det_model(m), rec_model(r), rec_char_dict(d) {
+  }
+
+  std::string det_model;
+  std::string rec_model;
+  std::string rec_char_dict;
+};
+
+class ResourceManager {
+public:
+  static ResourceManager& instance() {
+    // we do not need thread safe here
+    static ResourceManager res_instance;
+    return res_instance;
+  }
+
+  bool contains_ppocr_lang(const std::string& lang) {
+    return resources_.find(lang) != resources_.end();
+  }
+
+  std::string det_model(const std::string& lang) {
+    auto iter = resources_.find(lang);
+    return iter != resources_.end() ? iter->second.det_model : "";
+  }
+
+  std::string rec_model(const std::string& lang) {
+    auto iter = resources_.find(lang);
+    return iter != resources_.end() ? iter->second.rec_model : "";
+  }
+
+  std::string rec_char_dict(const std::string& lang) {
+    auto iter = resources_.find(lang);
+    return iter != resources_.end() ? iter->second.rec_char_dict : "";
+  }
+
+protected:
+  ResourceManager() {
+    // See paddleocr.py
+    resources_["ch"] = PaddleResource("models/ch_PP-OCRv4_det_infer", "models/ch_PP-OCRv4_rec_infer", "dicts/ppocr_keys_v1.txt");
+    resources_["en"] = PaddleResource("models/en_PP-OCRv3_det_infer", "models/en_PP-OCRv4_rec_infer", "dicts/en_dict.txt");
+    resources_["korean"] = PaddleResource("models/Multilingual_PP-OCRv3_det_infer", "models/korean_PP-OCRv4_rec_infer", "dicts/korean_dict.txt");
+    resources_["japan"] = PaddleResource("models/Multilingual_PP-OCRv3_det_infer", "models/japan_PP-OCRv4_rec_infer", "dicts/japan_dict.txt");
+    resources_["chinese_cht"] = PaddleResource("models/Multilingual_PP-OCRv3_det_infer", "models/chinese_cht_PP-OCRv3_rec_infer", "dicts/chinese_cht_dict.txt");
+    resources_["te"] = PaddleResource("models/Multilingual_PP-OCRv3_det_infer", "models/te_PP-OCRv4_rec_infer", "dicts/te_dict.txt");
+    resources_["ka"] = PaddleResource("models/Multilingual_PP-OCRv3_det_infer", "models/ka_PP-OCRv4_rec_infer", "dicts/ka_dict.txt");
+    resources_["latin"] = PaddleResource("models/Multilingual_PP-OCRv3_det_infer", "models/latin_PP-OCRv3_rec_infer", "dicts/latin_dict.txt");
+    resources_["arabic"] = PaddleResource("models/Multilingual_PP-OCRv3_det_infer", "models/arabic_PP-OCRv4_rec_infer", "dicts/ar_dict.txt");
+    resources_["cyrillic"] = PaddleResource("models/Multilingual_PP-OCRv3_det_infer", "models/cyrillic_PP-OCRv3_rec_infer", "dicts/cyrillic_dict.txt");
+    resources_["devanagari"] = PaddleResource("models/Multilingual_PP-OCRv3_det_infer", "models/devanagari_PP-OCRv4_rec_infer", "dicts/devanagari_dict.txt");
+  }
+
+private:
+  std::map<std::string, PaddleResource> resources_;
+};
+
 void check_worker_params() {
   if (FLAGS_det_model_dir.empty()) {
     std::cerr << "missing flag det_model_dir" << std::endl;
@@ -126,6 +184,11 @@ void from_json(const json& j, LocateTask& t) {
   }
 }
 
+void from_json(const json& j, PixelTask& t) {
+  j.at("x").get_to(t.x);
+  j.at("y").get_to(t.y);
+}
+
 std::mutex Worker::output_mutex_;
 
 // FLAGS_* are used in:
@@ -133,6 +196,10 @@ std::mutex Worker::output_mutex_;
 //  - PaddleStructure::PaddleStructure, PaddleStructure::benchmark_log
 Worker::Worker() {
   // construct default ppocr
+  std::cerr << "constructing default ppocr:" << std::endl;
+  std::cerr << "FLAGS_det_model_dir: " << FLAGS_det_model_dir << std::endl;
+  std::cerr << "FLAGS_rec_model_dir: " << FLAGS_rec_model_dir << std::endl;
+  std::cerr << "FLAGS_rec_char_dict_path: " << FLAGS_rec_char_dict_path << std::endl;
   ppocrs_[FLAGS_lang] = std::shared_ptr<PPOCR>(new PPOCR());
 }
 
@@ -159,17 +226,37 @@ void Worker::execute(const Task& task) {
     auto real_task = j.template get<LocateTask>();
     do_execute(task.id, real_task);
   }
+  else if (task.command == "pixel") {
+    auto real_task = j.template get<PixelTask>();
+    do_execute(task.id, real_task);
+  }
   else {
     std::cerr << "unknown task: " << task.command << std::endl;
   }
 }
 
-void Worker::do_execute(const std::string& id, const OcrTask& task) {
-  if (ppocrs_.find(task.lang) == ppocrs_.end()) {
-    // TODO initialize PPOCR with task.lang
-    ppocrs_[task.lang] = std::shared_ptr<PPOCR>(new PPOCR());
+std::shared_ptr<PPOCR> Worker::ppocr_by_lang(const std::string& lang) {
+  if (!ResourceManager::instance().contains_ppocr_lang(lang)) {
+    // return the default one
+    return ppocrs_[FLAGS_lang];
   }
-  std::shared_ptr<PPOCR> ppocr = ppocrs_[task.lang];
+  auto iter = ppocrs_.find(lang);
+  if (iter != ppocrs_.end()) {
+    return iter->second;
+  }
+  auto det_model = FLAGS_models_dir + "/" + ResourceManager::instance().det_model(lang);
+  auto rec_model = FLAGS_models_dir + "/" + ResourceManager::instance().rec_model(lang);
+  auto rec_char_dict = FLAGS_models_dir + "/" + ResourceManager::instance().rec_char_dict(lang);
+  ppocrs_[lang] = std::shared_ptr<PPOCR>(new PPOCR(det_model, rec_model, rec_char_dict));
+  return ppocrs_[lang];
+}
+
+void Worker::do_execute(const std::string& id, const OcrTask& task) {
+  //if (ppocrs_.find(task.lang) == ppocrs_.end()) {
+  //  // TODO initialize PPOCR with task.lang
+  //  ppocrs_[task.lang] = std::shared_ptr<PPOCR>(new PPOCR());
+  //}
+  std::shared_ptr<PPOCR> ppocr = ppocr_by_lang(task.lang);
 
   if (FLAGS_benchmark) {
     ppocr->reset_timer();
@@ -282,6 +369,18 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
   print_result(id, false, "locate failed");
 }
 
+void Worker::do_execute(const std::string& id, const PixelTask& task) {
+  cv::Mat img_with_alpha = captureScreenMat(task.x, task.y, 1, 1);
+  if (!img_with_alpha.data) {
+    std::cerr << "[ERROR] screenshot invalid data" << std::endl;
+    print_result(id, false, "capture screen failed");
+    return;
+  }
+  auto bgra = img_with_alpha.at<cv::Vec4b>(0, 0);
+  json result = { bgra[2], bgra[1], bgra[0], bgra[3] }; // to rgba
+  print_result(id, true, result.dump());
+}
+
 void Worker::print_result(const std::string& id, bool success, const std::string& content) {
   json j = json();
   j["id"] = id;
@@ -301,6 +400,7 @@ void Worker::print_result(const std::string& id, bool success, const std::vector
   for (std::vector<OCRPredictResult>::const_iterator p = ocr_result.begin(); p != ocr_result.end(); p++) {
     // it can be many results with score 0
     if (p->score < 0.00001) {
+      //std::cerr << "score: " << p->score << ", text: " << p->text << std::endl;
       continue;
     }
     ocr_texts.push_back({
@@ -371,9 +471,16 @@ int run_workers() {
   using namespace std::chrono_literals;
 
   // default ppocr
-  FLAGS_det_model_dir = FLAGS_models_dir + "/ch_PP-OCRv4_det_infer";
-  FLAGS_rec_model_dir = FLAGS_models_dir + "/ch_PP-OCRv4_rec_infer";
-  FLAGS_rec_char_dict_path = FLAGS_models_dir + "/ppocr_keys_v1.txt";
+  //FLAGS_det_model_dir = FLAGS_models_dir + "/ch_PP-OCRv4_det_infer";
+  //FLAGS_rec_model_dir = FLAGS_models_dir + "/ch_PP-OCRv4_rec_infer";
+  //FLAGS_rec_char_dict_path = FLAGS_models_dir + "/ppocr_keys_v1.txt";
+  if (!ResourceManager::instance().contains_ppocr_lang(FLAGS_lang)) {
+    std::cerr << "unsupported lang: " << FLAGS_lang << std::endl;
+    exit(1);
+  }
+  FLAGS_det_model_dir = FLAGS_models_dir + "/" + ResourceManager::instance().det_model(FLAGS_lang);
+  FLAGS_rec_model_dir = FLAGS_models_dir + "/" + ResourceManager::instance().rec_model(FLAGS_lang);
+  FLAGS_rec_char_dict_path = FLAGS_models_dir + "/" + ResourceManager::instance().rec_char_dict(FLAGS_lang);
 
   check_worker_params();
 

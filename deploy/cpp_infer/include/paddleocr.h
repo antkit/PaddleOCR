@@ -23,6 +23,7 @@ namespace PaddleOCR {
 class PPOCR {
 public:
   explicit PPOCR();
+  PPOCR(const std::string& det_model_dir, const std::string& rec_model_dir, const std::string& rec_char_dict_path);
   ~PPOCR();
 
   std::vector<std::vector<OCRPredictResult>> ocr(std::vector<cv::Mat> img_list,
