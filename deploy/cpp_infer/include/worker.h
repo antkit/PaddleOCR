@@ -36,6 +36,11 @@ struct PixelTask {
   int y;
 };
 
+struct ScreenshotTask {
+  std::vector<int> region; // screen region
+  std::string path; // path to save screenshot
+};
+
 class Worker {
 public:
   Worker();
@@ -50,6 +55,7 @@ protected:
   void do_execute(const std::string& id, const OcrTask& task);
   void do_execute(const std::string& id, const LocateTask& task);
   void do_execute(const std::string& id, const PixelTask& task);
+  void do_execute(const std::string& id, const ScreenshotTask& task);
 
   void print_result(const std::string& id, bool success, const std::string& content);
   void print_result(const std::string& id, bool success, const std::vector<PaddleOCR::OCRPredictResult>& ocr_result);

@@ -1,7 +1,9 @@
 #include "opencv2/core.hpp"
 #include "opencv2/imgcodecs.hpp"
 #include "opencv2/imgproc.hpp"
+#include <codecvt>
 #include <iostream>
+#include <locale>
 #include <thread>
 #include <vector>
 
@@ -87,6 +89,36 @@ void check_worker_params() {
     std::cerr << "missing flag rec_char_dict_path" << std::endl;
     exit(1);
   }
+}
+
+bool read_image(const std::string& filepath, cv::Mat& dst) {
+  std::wstring_convert<std::codecvt_utf8<wchar_t>> conv;
+  std::wstring path = conv.from_bytes(filepath.c_str());
+  std::ifstream file(path, std::iostream::binary);
+  if (!file) {
+    return false;
+  }
+
+  size_t length = file.rdbuf()->pubseekoff(0, file.end, file.in);
+  file.rdbuf()->pubseekpos(0, file.in);
+  std::vector<uchar> buf(length);
+  file.rdbuf()->sgetn((char*)buf.data(), length);
+  cv::imdecode(buf, cv::IMREAD_COLOR, &dst);
+  return true;
+}
+
+bool write_image(const std::string& filepath, const cv::Mat& src) {
+  std::wstring_convert<std::codecvt_utf8<wchar_t>> conv;
+  std::wstring path = conv.from_bytes(filepath.c_str());
+  std::ofstream file(path, std::iostream::binary);
+  if (!file) {
+    return false;
+  }
+
+  std::vector<uchar> buf;
+  cv::imencode(".png", src, buf);
+  file.write((char*)buf.data(), buf.size());
+  return true;
 }
 
 void split(const std::string& s, std::vector<std::string>& sv, const char* delim = " ") {
@@ -189,6 +221,11 @@ void from_json(const json& j, PixelTask& t) {
   j.at("y").get_to(t.y);
 }
 
+void from_json(const json& j, ScreenshotTask& t) {
+  j.at("region").get_to(t.region);
+  j.at("path").get_to(t.path);
+}
+
 std::mutex Worker::output_mutex_;
 
 // FLAGS_* are used in:
@@ -213,7 +250,6 @@ bool Worker::busy() {
 void Worker::execute(const Task& task) {
   auto j = json::parse(task.content, nullptr, false);
   if (j.is_discarded()) {
-    std::cerr << "invalid task content" << std::endl;
     print_result(task.id, false, "invalid task content");
     return;
   }
@@ -228,6 +264,10 @@ void Worker::execute(const Task& task) {
   }
   else if (task.command == "pixel") {
     auto real_task = j.template get<PixelTask>();
+    do_execute(task.id, real_task);
+  }
+  else if (task.command == "screenshot") {
+    auto real_task = j.template get<ScreenshotTask>();
     do_execute(task.id, real_task);
   }
   else {
@@ -265,8 +305,7 @@ void Worker::do_execute(const std::string& id, const OcrTask& task) {
   // TODO deal with w=0 and h=0
   cv::Mat img_with_alpha = captureScreenMat(task.region[0], task.region[1], task.region[2], task.region[3]);
   if (!img_with_alpha.data) {
-    std::cerr << "[ERROR] screenshot invalid data" << std::endl;
-    print_result(id, false, "[]");
+    print_result(id, false, "captured screen without data");
     return;
   }
   //cv::imwrite(FLAGS_output + "/screenshot.png", img_with_alpha);
@@ -297,7 +336,7 @@ void Worker::do_execute(const std::string& id, const OcrTask& task) {
   //std::cerr << "\t ocr finished" << std::endl;
 
   const std::vector<int>& rg = task.region;
-  std::cerr << "predict screenshot: " << rg[0] << "," << rg[1] << "," << rg[2] << "," << rg[3] << std::endl;
+  std::cerr << "predict screen: " << rg[0] << "," << rg[1] << "," << rg[2] << "," << rg[3] << std::endl;
   print_result(id, true, ocr_result);
   if (FLAGS_visualize && FLAGS_det) {
     std::unique_ptr<char[]> buf(new char[size_t(128)]);
@@ -316,8 +355,7 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
   // TODO deal with w=0 and h=0
   cv::Mat img_with_alpha = captureScreenMat(task.region[0], task.region[1], task.region[2], task.region[3]);
   if (!img_with_alpha.data) {
-    std::cerr << "[ERROR] screenshot invalid data" << std::endl;
-    print_result(id, false, "capture screen failed");
+    print_result(id, false, "captured screen without data");
     return;
   }
 
@@ -334,8 +372,25 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
   }
 
   for (size_t i = 0; i < task.images.size(); i++) {
-    //std::cerr << "imread template " << task.images[i] << std::endl;
-    auto templ = cv::imread(task.images[i], cv::IMREAD_COLOR); // cv::IMREAD_GRAYSCALE
+    //auto templ = cv::imread(task.images[i], cv::IMREAD_COLOR); // cv::IMREAD_GRAYSCALE
+    cv::Mat templ;
+    if (!read_image(task.images[i], templ)) {
+      print_result(id, false, "can't load the image");
+      return;
+    }
+    //std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
+    //std::wstring filepath = converter.from_bytes(task.images[i].c_str());
+    //std::ifstream file(filepath, std::iostream::binary);
+    //if (!file) {
+    //  print_result(id, false, "can't load the image");
+    //  return;
+    //}
+    //size_t length = file.rdbuf()->pubseekoff(0, file.end, file.in);
+    //file.rdbuf()->pubseekpos(0, file.in);
+    //std::vector<uchar> buffer(length);
+    //file.rdbuf()->sgetn((char*)buffer.data(), length);
+    //auto templ = cv::imdecode(buffer, cv::IMREAD_COLOR);
+
     // TM_CCOEFF_NORMED's range(-1, 1), and the best matching is maxLoc
     auto match_method = cv::TemplateMatchModes::TM_CCOEFF_NORMED; // TM_CCORR_NORMED;
     cv::Mat result;// (cv::Size(img.cols - templ.cols + 1, img.rows - templ.rows + 1), CV_32FC1);
@@ -372,8 +427,7 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
 void Worker::do_execute(const std::string& id, const PixelTask& task) {
   cv::Mat img_with_alpha = captureScreenMat(task.x, task.y, 1, 1);
   if (!img_with_alpha.data) {
-    std::cerr << "[ERROR] screenshot invalid data" << std::endl;
-    print_result(id, false, "capture screen failed");
+    print_result(id, false, "captured screen without data");
     return;
   }
   auto bgra = img_with_alpha.at<cv::Vec4b>(0, 0);
@@ -381,12 +435,25 @@ void Worker::do_execute(const std::string& id, const PixelTask& task) {
   print_result(id, true, result.dump());
 }
 
+void Worker::do_execute(const std::string& id, const ScreenshotTask& task) {
+  cv::Mat img_with_alpha = captureScreenMat(task.region[0], task.region[1], task.region[2], task.region[3]);
+  if (!img_with_alpha.data) {
+    print_result(id, false, "captured screen without data");
+    return;
+  }
+  //cv::imwrite(task.path, img_with_alpha);
+  if (!write_image(task.path, img_with_alpha)) {
+    print_result(id, false, "write image failed");
+    return;
+  }
+  print_result(id, true, "{}");
+}
+
 void Worker::print_result(const std::string& id, bool success, const std::string& content) {
   json j = json();
   j["id"] = id;
   j["success"] = success;
   j["content"] = content;
-  //std::cout << j.dump() << std::endl;
 
   std::ostringstream stream;
   stream << '\n' << j.dump(); // enforce start a new line
@@ -469,6 +536,10 @@ private:
 
 int run_workers() {
   using namespace std::chrono_literals;
+
+  //auto img = cv::imread("D:\\Temp\\Ǯ�נDTest\\6c7b2e12151940ab7b0d9f4815bbfb25", cv::IMREAD_COLOR);
+  //cv::imwrite("D:\\Temp\\Ǯ�נDTest\\6c7b2e12151940ab7b0d9f4815bbfb25.png", img);
+  //return 1;
 
   // default ppocr
   //FLAGS_det_model_dir = FLAGS_models_dir + "/ch_PP-OCRv4_det_infer";

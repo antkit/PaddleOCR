@@ -182,7 +182,7 @@ int main(int argc, char **argv) {
   if (FLAGS_workers_num > 0) {
       return run_workers();
   }
-  check_params();
+  //check_params();
 
   if (!Utility::PathExists(FLAGS_image_dir)) {
     std::cerr << "[ERROR] image path not exist! image_dir: " << FLAGS_image_dir
