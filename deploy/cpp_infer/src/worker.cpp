@@ -284,9 +284,9 @@ std::shared_ptr<PPOCR> Worker::ppocr_by_lang(const std::string& lang) {
   if (iter != ppocrs_.end()) {
     return iter->second;
   }
-  auto det_model = FLAGS_models_dir + "/" + ResourceManager::instance().det_model(lang);
-  auto rec_model = FLAGS_models_dir + "/" + ResourceManager::instance().rec_model(lang);
-  auto rec_char_dict = FLAGS_models_dir + "/" + ResourceManager::instance().rec_char_dict(lang);
+  auto det_model = FLAGS_data_dir + "/" + ResourceManager::instance().det_model(lang);
+  auto rec_model = FLAGS_data_dir + "/" + ResourceManager::instance().rec_model(lang);
+  auto rec_char_dict = FLAGS_data_dir + "/" + ResourceManager::instance().rec_char_dict(lang);
   ppocrs_[lang] = std::shared_ptr<PPOCR>(new PPOCR(det_model, rec_model, rec_char_dict));
   return ppocrs_[lang];
 }
@@ -372,24 +372,11 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
   }
 
   for (size_t i = 0; i < task.images.size(); i++) {
-    //auto templ = cv::imread(task.images[i], cv::IMREAD_COLOR); // cv::IMREAD_GRAYSCALE
     cv::Mat templ;
     if (!read_image(task.images[i], templ)) {
       print_result(id, false, "can't load the image");
       return;
     }
-    //std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
-    //std::wstring filepath = converter.from_bytes(task.images[i].c_str());
-    //std::ifstream file(filepath, std::iostream::binary);
-    //if (!file) {
-    //  print_result(id, false, "can't load the image");
-    //  return;
-    //}
-    //size_t length = file.rdbuf()->pubseekoff(0, file.end, file.in);
-    //file.rdbuf()->pubseekpos(0, file.in);
-    //std::vector<uchar> buffer(length);
-    //file.rdbuf()->sgetn((char*)buffer.data(), length);
-    //auto templ = cv::imdecode(buffer, cv::IMREAD_COLOR);
 
     // TM_CCOEFF_NORMED's range(-1, 1), and the best matching is maxLoc
     auto match_method = cv::TemplateMatchModes::TM_CCOEFF_NORMED; // TM_CCORR_NORMED;
@@ -537,21 +524,13 @@ private:
 int run_workers() {
   using namespace std::chrono_literals;
 
-  //auto img = cv::imread("D:\\Temp\\Ǯ�נDTest\\6c7b2e12151940ab7b0d9f4815bbfb25", cv::IMREAD_COLOR);
-  //cv::imwrite("D:\\Temp\\Ǯ�נDTest\\6c7b2e12151940ab7b0d9f4815bbfb25.png", img);
-  //return 1;
-
-  // default ppocr
-  //FLAGS_det_model_dir = FLAGS_models_dir + "/ch_PP-OCRv4_det_infer";
-  //FLAGS_rec_model_dir = FLAGS_models_dir + "/ch_PP-OCRv4_rec_infer";
-  //FLAGS_rec_char_dict_path = FLAGS_models_dir + "/ppocr_keys_v1.txt";
   if (!ResourceManager::instance().contains_ppocr_lang(FLAGS_lang)) {
     std::cerr << "unsupported lang: " << FLAGS_lang << std::endl;
     exit(1);
   }
-  FLAGS_det_model_dir = FLAGS_models_dir + "/" + ResourceManager::instance().det_model(FLAGS_lang);
-  FLAGS_rec_model_dir = FLAGS_models_dir + "/" + ResourceManager::instance().rec_model(FLAGS_lang);
-  FLAGS_rec_char_dict_path = FLAGS_models_dir + "/" + ResourceManager::instance().rec_char_dict(FLAGS_lang);
+  FLAGS_det_model_dir = FLAGS_data_dir + "/" + ResourceManager::instance().det_model(FLAGS_lang);
+  FLAGS_rec_model_dir = FLAGS_data_dir + "/" + ResourceManager::instance().rec_model(FLAGS_lang);
+  FLAGS_rec_char_dict_path = FLAGS_data_dir + "/" + ResourceManager::instance().rec_char_dict(FLAGS_lang);
 
   check_worker_params();
 

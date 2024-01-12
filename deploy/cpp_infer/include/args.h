@@ -67,7 +67,7 @@ DECLARE_bool(cls);
 DECLARE_bool(table);
 DECLARE_bool(layout);
 // worker related
-DECLARE_string(models_dir);
+DECLARE_string(data_dir);
 DECLARE_int32(workers_num);
 DECLARE_string(task);
 DECLARE_string(lang);
