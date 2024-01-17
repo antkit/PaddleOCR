@@ -182,26 +182,34 @@ OcrTask::OcrTask()
 }
 
 LocateTask::LocateTask()
-  : scale(1.0), confidence(0.999) {
+  : scale(1.0), /*grayscale(false), */confidence(0) {
 }
 
 void from_json(const json& j, Task& t) {
   j.at("id").get_to(t.id);
   j.at("command").get_to(t.command);
-  j.at("content").get_to(t.content);
+  if (j.contains("content")) {
+    j.at("content").get_to(t.content);
+  }
 }
 
 void from_json(const json& j, OcrTask& t) {
   j.at("lang").get_to(t.lang);
+  if (j.contains("img")) {
+    j.at("img").get_to(t.img);
+  }
   j.at("region").get_to(t.region);
   if (j.contains("scale")) {
     j.at("scale").get_to(t.scale);
   }
-  j.at("det").get_to(t.det);
-  j.at("rec").get_to(t.rec);
-  j.at("cls").get_to(t.cls);
-  if (j.contains("img")) {
-    j.at("img").get_to(t.img);
+  if (j.contains("det")) {
+    j.at("det").get_to(t.det);
+  }
+  if (j.contains("rec")) {
+    j.at("rec").get_to(t.rec);
+  }
+  if (j.contains("cls")) {
+    j.at("cls").get_to(t.cls);
   }
 }
 
@@ -211,8 +219,20 @@ void from_json(const json& j, LocateTask& t) {
   if (j.contains("scale")) {
     j.at("scale").get_to(t.scale);
   }
+  //if (j.contains("grayscale")) {
+  //  j.at("grayscale").get_to(t.grayscale);
+  //}
   if (j.contains("confidence")) {
     j.at("confidence").get_to(t.confidence);
+  }
+  if (j.contains("actions")) {
+    j.at("actions").get_to(t.actions);
+  }
+  if (j.contains("mode")) {
+    j.at("mode").get_to(t.mode);
+  }
+  if (j.contains("mask")) {
+    j.at("mask").get_to(t.mask);
   }
 }
 
@@ -348,66 +368,119 @@ void Worker::do_execute(const std::string& id, const OcrTask& task) {
   }
 }
 
+struct LocateAction {
+  std::string action;
+  std::string params;
+};
+
+struct LocateResult {
+  int located; // index of the image located
+  std::vector<int> region; // result region
+  float score; // maxLoc value, 0~1
+};
+
 void Worker::do_execute(const std::string& id, const LocateTask& task) {
   // TODO support task.grayscale
-  //std::cerr << "executing locate task" << std::endl;
+  std::cerr << "executing locate task" << std::endl;
 
   // TODO deal with w=0 and h=0
-  cv::Mat img_with_alpha = captureScreenMat(task.region[0], task.region[1], task.region[2], task.region[3]);
-  if (!img_with_alpha.data) {
+  cv::Mat captured_with_alpha = captureScreenMat(task.region[0], task.region[1], task.region[2], task.region[3]);
+  if (!captured_with_alpha.data) {
     print_result(id, false, "captured screen without data");
     return;
   }
 
   bool with_scale = std::abs(task.scale - 1.0) > 0.0001;
-  cv::Mat img = cv::Mat();
+  cv::Mat captured = cv::Mat();
   if (with_scale) {
-    auto new_size = cv::Size(int(img_with_alpha.cols * task.scale), int(img_with_alpha.rows * task.scale));
+    auto new_size = cv::Size(int(captured_with_alpha.cols * task.scale), int(captured_with_alpha.rows * task.scale));
     cv::Mat scaled = cv::Mat();
-    cv::resize(img_with_alpha, scaled, new_size);
-    cv::cvtColor(scaled, img, cv::COLOR_BGRA2BGR);
+    cv::resize(captured_with_alpha, scaled, new_size);
+    cv::cvtColor(scaled, captured, cv::COLOR_BGRA2BGR);
   }
   else {
-    cv::cvtColor(img_with_alpha, img, cv::COLOR_BGRA2BGR);
+    cv::cvtColor(captured_with_alpha, captured, cv::COLOR_BGRA2BGR);
   }
 
+  // TODO support flip
+  bool locate_on_screen = task.mode.empty() || task.mode == "screen";
+  std::cerr << "locate_on_screen: " << locate_on_screen << std::endl;
+
+  // TODO use multithread for multiple images locating?
   for (size_t i = 0; i < task.images.size(); i++) {
-    cv::Mat templ;
-    if (!read_image(task.images[i], templ)) {
+    cv::Mat image;
+    if (!read_image(task.images[i], image)) {
       print_result(id, false, "can't load the image");
       return;
     }
 
-    // TM_CCOEFF_NORMED's range(-1, 1), and the best matching is maxLoc
+    // TODO load task.mask and use it
+    // TM_CCOEFF_NORMED's range -1~1, and the best matching is maxLoc
     auto match_method = cv::TemplateMatchModes::TM_CCOEFF_NORMED; // TM_CCORR_NORMED;
-    cv::Mat result;// (cv::Size(img.cols - templ.cols + 1, img.rows - templ.rows + 1), CV_32FC1);
-    cv::matchTemplate(img, templ, result, match_method);
+    cv::Mat result;
+    if (locate_on_screen) {
+      cv::matchTemplate(captured, image, result, match_method);
+    }
+    else {
+      cv::matchTemplate(image, captured, result, match_method);
+    }
     //std::cerr << "matchTemplate finished " << std::endl;
 
     double minVal, maxVal;
     cv::Point minLoc, maxLoc;
     cv::minMaxLoc(result, &minVal, &maxVal, &minLoc, &maxLoc, cv::Mat());
-    //std::cerr << "minVal: " << minVal << ", maxVal: " << maxVal << ", required: " << task.confidence << std::endl;
 
-    //cv::rectangle(img_with_alpha, maxLoc, cv::Point(maxLoc.x + templ.cols, maxLoc.y + templ.rows), cv::Scalar::all(0), 2, 8, 0);
-    //cv::rectangle(img, maxLoc, cv::Point(maxLoc.x + templ.cols, maxLoc.y + templ.rows), cv::Scalar::all(255), 2, 8, 0);
-    //cv::rectangle(result, maxLoc, cv::Point(maxLoc.x + templ.cols, maxLoc.y + templ.rows), cv::Scalar::all(0), 2, 8, 0);
-    //cv::imwrite(FLAGS_output + "/locate_screen.png", img_with_alpha);
-    //cv::imwrite(FLAGS_output + "/locate_screen_scaled.png", img);
-    //cv::imwrite(FLAGS_output + "/locate_result.png", result);
-
+    // (maxVal + 1) / 2 transform -1~1 to 0~1
     if ((maxVal + 1) / 2 >= task.confidence) {
       json result = {
         int(i),
-        task.region[0] + (with_scale ? int(maxLoc.x / task.scale) : maxLoc.x),
-        task.region[1] + (with_scale ? int(maxLoc.y / task.scale) : maxLoc.y),
-        with_scale ? int(templ.rows / task.scale) : templ.rows,
-        with_scale ? int(templ.cols / task.scale) : templ.cols
+        locate_on_screen ? (task.region[0] + (with_scale ? int(maxLoc.x / task.scale) : maxLoc.x)) : maxLoc.x,
+        locate_on_screen ? (task.region[1] + (with_scale ? int(maxLoc.y / task.scale) : maxLoc.y)) : maxLoc.y,
+        locate_on_screen ? (with_scale ? int(image.cols / task.scale) : image.cols) : captured.cols,
+        locate_on_screen ? (with_scale ? int(image.rows / task.scale) : image.rows) : captured.rows
       };
       print_result(id, true, result.dump());
       return;
     }
   }
+
+  //for (size_t i = 0; i < task.images.size(); i++) {
+  //  cv::Mat templ;
+  //  if (!read_image(task.images[i], templ)) {
+  //    print_result(id, false, "can't load the image");
+  //    return;
+  //  }
+
+  //  // TM_CCOEFF_NORMED's range(-1, 1), and the best matching is maxLoc
+  //  auto match_method = cv::TemplateMatchModes::TM_CCOEFF_NORMED; // TM_CCORR_NORMED;
+  //  cv::Mat result;// (cv::Size(captured.cols - templ.cols + 1, captured.rows - templ.rows + 1), CV_32FC1);
+  //  cv::matchTemplate(captured, templ, result, match_method);
+  //  //std::cerr << "matchTemplate finished " << std::endl;
+
+  //  double minVal, maxVal;
+  //  cv::Point minLoc, maxLoc;
+  //  cv::minMaxLoc(result, &minVal, &maxVal, &minLoc, &maxLoc, cv::Mat());
+  //  //std::cerr << "minVal: " << minVal << ", maxVal: " << maxVal << ", required: " << task.confidence << std::endl;
+
+  //  //cv::rectangle(captured_with_alpha, maxLoc, cv::Point(maxLoc.x + templ.cols, maxLoc.y + templ.rows), cv::Scalar::all(0), 2, 8, 0);
+  //  //cv::rectangle(captured, maxLoc, cv::Point(maxLoc.x + templ.cols, maxLoc.y + templ.rows), cv::Scalar::all(255), 2, 8, 0);
+  //  //cv::rectangle(result, maxLoc, cv::Point(maxLoc.x + templ.cols, maxLoc.y + templ.rows), cv::Scalar::all(0), 2, 8, 0);
+  //  //cv::imwrite(FLAGS_output + "/locate_screen.png", img_with_alpha);
+  //  //cv::imwrite(FLAGS_output + "/locate_screen_scaled.png", captured);
+  //  //cv::imwrite(FLAGS_output + "/locate_result.png", result);
+
+  //  if ((maxVal + 1) / 2 >= task.confidence) {
+  //    json result = {
+  //      int(i),
+  //      task.region[0] + (with_scale ? int(maxLoc.x / task.scale) : maxLoc.x),
+  //      task.region[1] + (with_scale ? int(maxLoc.y / task.scale) : maxLoc.y),
+  //      with_scale ? int(templ.cols / task.scale) : templ.cols,
+  //      with_scale ? int(templ.rows / task.scale) : templ.rows
+  //    };
+  //    print_result(id, true, result.dump());
+  //    return;
+  //  }
+  //}
   print_result(id, false, "locate failed");
 }
 
@@ -550,7 +623,7 @@ int run_workers() {
     }
 
     if (FLAGS_visualize) {
-      //std::cerr << "LINE: " << line << std::endl;
+      std::cerr << "LINE: " << line << std::endl;
     }
     auto j = json::parse(line, nullptr, false);
     if (j.is_discarded() || !j.contains("command")) {

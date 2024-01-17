@@ -14,12 +14,12 @@ struct OcrTask {
   OcrTask();
 
   std::string lang;
+  std::string img; // img first then region on screen
   std::vector<int> region; // screen region
   float scale;
   bool det;
   bool rec;
   bool cls;
-  std::string img;
 };
 
 struct LocateTask {
@@ -27,8 +27,13 @@ struct LocateTask {
 
   std::vector<std::string> images;
   std::vector<int> region; // screen region
-  float scale; // scale the image on screen region
+  float scale; // scale(factor) the image captured from screen
+  //bool grayscale;
   float confidence;
+
+  std::vector<std::string> actions; // (flip, grayscale,)
+  std::string mode; // screen | images, locate on/in
+  std::string mask;
 };
 
 struct PixelTask {
