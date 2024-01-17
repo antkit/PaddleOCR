@@ -182,7 +182,7 @@ OcrTask::OcrTask()
 }
 
 LocateTask::LocateTask()
-  : scale(1.0), /*grayscale(false), */confidence(0) {
+  : confidence(0) {
 }
 
 void from_json(const json& j, Task& t) {
@@ -216,12 +216,6 @@ void from_json(const json& j, OcrTask& t) {
 void from_json(const json& j, LocateTask& t) {
   j.at("images").get_to(t.images);
   j.at("region").get_to(t.region);
-  if (j.contains("scale")) {
-    j.at("scale").get_to(t.scale);
-  }
-  //if (j.contains("grayscale")) {
-  //  j.at("grayscale").get_to(t.grayscale);
-  //}
   if (j.contains("confidence")) {
     j.at("confidence").get_to(t.confidence);
   }
@@ -312,12 +306,7 @@ std::shared_ptr<PPOCR> Worker::ppocr_by_lang(const std::string& lang) {
 }
 
 void Worker::do_execute(const std::string& id, const OcrTask& task) {
-  //if (ppocrs_.find(task.lang) == ppocrs_.end()) {
-  //  // TODO initialize PPOCR with task.lang
-  //  ppocrs_[task.lang] = std::shared_ptr<PPOCR>(new PPOCR());
-  //}
   std::shared_ptr<PPOCR> ppocr = ppocr_by_lang(task.lang);
-
   if (FLAGS_benchmark) {
     ppocr->reset_timer();
   }
@@ -373,38 +362,102 @@ struct LocateAction {
   std::string params;
 };
 
-struct LocateResult {
-  int located; // index of the image located
-  std::vector<int> region; // result region
-  float score; // maxLoc value, 0~1
+void from_json(const json& j, LocateAction& a) {
+  j.at("action").get_to(a.action);
+  if (j.contains("params")) {
+    j.at("params").get_to(a.params);
+  }
+}
+
+struct ActionResizeParams {
+  int width;
+  int height;
 };
+
+void from_json(const json& j, ActionResizeParams& a) {
+  if (j.contains("width")) {
+    j.at("width").get_to(a.width);
+  }
+  if (j.contains("height")) {
+    j.at("height").get_to(a.height);
+  }
+}
+
+struct ActionFlipParams {
+  int code;
+};
+
+void from_json(const json& j, ActionFlipParams& a) {
+  if (j.contains("code")) {
+    j.at("code").get_to(a.code);
+  }
+}
+
+struct LocateResult {
+  LocateResult();
+
+  int located; // index of the image located
+  cv::Rect region; // x, y, w, h
+  double score; // maxLoc value, 0~1
+};
+
+LocateResult::LocateResult()
+  : located(-1), score(0) {
+}
 
 void Worker::do_execute(const std::string& id, const LocateTask& task) {
   // TODO support task.grayscale
   std::cerr << "executing locate task" << std::endl;
 
   // TODO deal with w=0 and h=0
-  cv::Mat captured_with_alpha = captureScreenMat(task.region[0], task.region[1], task.region[2], task.region[3]);
-  if (!captured_with_alpha.data) {
+  cv::Mat captured_bgra = captureScreenMat(task.region[0], task.region[1], task.region[2], task.region[3]);
+  if (!captured_bgra.data) {
     print_result(id, false, "captured screen without data");
     return;
   }
 
-  bool with_scale = std::abs(task.scale - 1.0) > 0.0001;
-  cv::Mat captured = cv::Mat();
-  if (with_scale) {
-    auto new_size = cv::Size(int(captured_with_alpha.cols * task.scale), int(captured_with_alpha.rows * task.scale));
-    cv::Mat scaled = cv::Mat();
-    cv::resize(captured_with_alpha, scaled, new_size);
-    cv::cvtColor(scaled, captured, cv::COLOR_BGRA2BGR);
-  }
-  else {
-    cv::cvtColor(captured_with_alpha, captured, cv::COLOR_BGRA2BGR);
+  cv::Mat captured_bgr;
+  cv::cvtColor(captured_bgra, captured_bgr, cv::COLOR_BGRA2BGR);
+
+  std::unique_ptr<cv::Size> resize = std::make_unique<cv::Size>(captured_bgr.cols, captured_bgr.rows);
+  std::unique_ptr<cv::Mat> mat_exchanger;
+  for (size_t i = 0; i < task.actions.size(); i++) {
+    std::cerr << "action:" << task.actions[i] << std::endl;
+    auto j = json::parse(task.actions[i], nullptr, false);
+    if (j.is_discarded()) {
+      print_result(id, false, "invalid action content in locate");
+      return;
+    }
+    auto action = j.template get<LocateAction>();
+    auto j2 = json::parse(action.params, nullptr, false);
+    if (j2.is_discarded()) {
+      print_result(id, false, "invalid action params in locate");
+      return;
+    }
+    if (action.action == "resize") {
+      auto params = j2.template get<ActionResizeParams>();
+      int width = params.width > 0 ? params.width : captured_bgr.cols;
+      int height = params.height > 0 ? params.height : captured_bgr.rows;
+      resize = std::make_unique<cv::Size>(width, height);
+      std::unique_ptr<cv::Mat> mat_output(new cv::Mat());
+      cv::resize(mat_exchanger ? *mat_exchanger : captured_bgr, *mat_output, *resize);
+      mat_exchanger = std::move(mat_output);
+    }
+    else if (action.action == "flip") {
+      auto params = j2.template get<ActionFlipParams>();
+      std::unique_ptr<cv::Mat> mat_output(new cv::Mat());
+      cv::flip(mat_exchanger ? *mat_exchanger : captured_bgr, *mat_output, params.code);
+      mat_exchanger = std::move(mat_output);
+    }
+    else if (action.action == "grayscale") {
+      print_result(id, false, "not implemented grayscale in locate");
+      return;
+    }
   }
 
-  // TODO support flip
+  cv::Mat& capture_processed = mat_exchanger ? *mat_exchanger : captured_bgr;
   bool locate_on_screen = task.mode.empty() || task.mode == "screen";
-  std::cerr << "locate_on_screen: " << locate_on_screen << std::endl;
+  LocateResult loc_result;
 
   // TODO use multithread for multiple images locating?
   for (size_t i = 0; i < task.images.size(); i++) {
@@ -414,73 +467,53 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
       return;
     }
 
-    // TODO load task.mask and use it
+    // TODO load mask and use it
     // TM_CCOEFF_NORMED's range -1~1, and the best matching is maxLoc
     auto match_method = cv::TemplateMatchModes::TM_CCOEFF_NORMED; // TM_CCORR_NORMED;
     cv::Mat result;
     if (locate_on_screen) {
-      cv::matchTemplate(captured, image, result, match_method);
+      cv::matchTemplate(capture_processed, image, result, match_method);
     }
     else {
-      cv::matchTemplate(image, captured, result, match_method);
+      cv::matchTemplate(image, capture_processed, result, match_method);
     }
     //std::cerr << "matchTemplate finished " << std::endl;
 
     double minVal, maxVal;
     cv::Point minLoc, maxLoc;
     cv::minMaxLoc(result, &minVal, &maxVal, &minLoc, &maxLoc, cv::Mat());
-
-    // (maxVal + 1) / 2 transform -1~1 to 0~1
-    if ((maxVal + 1) / 2 >= task.confidence) {
-      json result = {
-        int(i),
-        locate_on_screen ? (task.region[0] + (with_scale ? int(maxLoc.x / task.scale) : maxLoc.x)) : maxLoc.x,
-        locate_on_screen ? (task.region[1] + (with_scale ? int(maxLoc.y / task.scale) : maxLoc.y)) : maxLoc.y,
-        locate_on_screen ? (with_scale ? int(image.cols / task.scale) : image.cols) : captured.cols,
-        locate_on_screen ? (with_scale ? int(image.rows / task.scale) : image.rows) : captured.rows
-      };
-      print_result(id, true, result.dump());
-      return;
+    if ((maxVal + 1) / 2 > loc_result.score) {
+      loc_result.score = (maxVal + 1) / 2;
+      loc_result.located = int(i);
+      if (locate_on_screen) {
+//      locate_on_screen ? (task.region[0] + (with_scale ? int(maxLoc.x / task.scale) : maxLoc.x)) : maxLoc.x,
+//      locate_on_screen ? (task.region[1] + (with_scale ? int(maxLoc.y / task.scale) : maxLoc.y)) : maxLoc.y,
+//      locate_on_screen ? (with_scale ? int(image.cols / task.scale) : image.cols) : captured.cols,
+//      locate_on_screen ? (with_scale ? int(image.rows / task.scale) : image.rows) : captured.rows
+        loc_result.region.x = task.region[0] + maxLoc.x * captured_bgr.cols / resize->width;
+        loc_result.region.y = task.region[1] + maxLoc.y * captured_bgr.rows / resize->height;
+        loc_result.region.width = image.cols * captured_bgr.cols / resize->width;
+        loc_result.region.height = image.rows * captured_bgr.rows / resize->height;
+      }
+      else {
+        loc_result.region.x = maxLoc.x;
+        loc_result.region.y = maxLoc.y;
+        loc_result.region.width = resize->width;
+        loc_result.region.height = resize->height;
+      }
+    }
+    // if confidence is not speicifed, we'll locate all images and get the best one
+    if (task.confidence > 0.00001 && loc_result.score > task.confidence) {
+      break;
     }
   }
+  if (loc_result.located >= 0 && loc_result.score >= task.confidence) {
+    cv::Rect& rc = loc_result.region;
+    json result = { loc_result.located, rc.x, rc.y, rc.width, rc.height, float(loc_result.score) };
+    print_result(id, true, result.dump());
+    return;
+  }
 
-  //for (size_t i = 0; i < task.images.size(); i++) {
-  //  cv::Mat templ;
-  //  if (!read_image(task.images[i], templ)) {
-  //    print_result(id, false, "can't load the image");
-  //    return;
-  //  }
-
-  //  // TM_CCOEFF_NORMED's range(-1, 1), and the best matching is maxLoc
-  //  auto match_method = cv::TemplateMatchModes::TM_CCOEFF_NORMED; // TM_CCORR_NORMED;
-  //  cv::Mat result;// (cv::Size(captured.cols - templ.cols + 1, captured.rows - templ.rows + 1), CV_32FC1);
-  //  cv::matchTemplate(captured, templ, result, match_method);
-  //  //std::cerr << "matchTemplate finished " << std::endl;
-
-  //  double minVal, maxVal;
-  //  cv::Point minLoc, maxLoc;
-  //  cv::minMaxLoc(result, &minVal, &maxVal, &minLoc, &maxLoc, cv::Mat());
-  //  //std::cerr << "minVal: " << minVal << ", maxVal: " << maxVal << ", required: " << task.confidence << std::endl;
-
-  //  //cv::rectangle(captured_with_alpha, maxLoc, cv::Point(maxLoc.x + templ.cols, maxLoc.y + templ.rows), cv::Scalar::all(0), 2, 8, 0);
-  //  //cv::rectangle(captured, maxLoc, cv::Point(maxLoc.x + templ.cols, maxLoc.y + templ.rows), cv::Scalar::all(255), 2, 8, 0);
-  //  //cv::rectangle(result, maxLoc, cv::Point(maxLoc.x + templ.cols, maxLoc.y + templ.rows), cv::Scalar::all(0), 2, 8, 0);
-  //  //cv::imwrite(FLAGS_output + "/locate_screen.png", img_with_alpha);
-  //  //cv::imwrite(FLAGS_output + "/locate_screen_scaled.png", captured);
-  //  //cv::imwrite(FLAGS_output + "/locate_result.png", result);
-
-  //  if ((maxVal + 1) / 2 >= task.confidence) {
-  //    json result = {
-  //      int(i),
-  //      task.region[0] + (with_scale ? int(maxLoc.x / task.scale) : maxLoc.x),
-  //      task.region[1] + (with_scale ? int(maxLoc.y / task.scale) : maxLoc.y),
-  //      with_scale ? int(templ.cols / task.scale) : templ.cols,
-  //      with_scale ? int(templ.rows / task.scale) : templ.rows
-  //    };
-  //    print_result(id, true, result.dump());
-  //    return;
-  //  }
-  //}
   print_result(id, false, "locate failed");
 }
 

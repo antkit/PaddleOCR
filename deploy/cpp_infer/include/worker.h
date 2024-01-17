@@ -27,8 +27,6 @@ struct LocateTask {
 
   std::vector<std::string> images;
   std::vector<int> region; // screen region
-  float scale; // scale(factor) the image captured from screen
-  //bool grayscale;
   float confidence;
 
   std::vector<std::string> actions; // (flip, grayscale,)
