@@ -32,6 +32,7 @@ struct LocateTask {
   std::vector<std::string> actions; // (flip, grayscale,)
   std::string mode; // screen | images, locate on/in
   std::string mask;
+  int method;
 };
 
 struct PixelTask {

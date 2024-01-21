@@ -182,7 +182,7 @@ OcrTask::OcrTask()
 }
 
 LocateTask::LocateTask()
-  : confidence(0) {
+  : confidence(0), method(5) {
 }
 
 void from_json(const json& j, Task& t) {
@@ -227,6 +227,9 @@ void from_json(const json& j, LocateTask& t) {
   }
   if (j.contains("mask")) {
     j.at("mask").get_to(t.mask);
+  }
+  if (j.contains("method")) {
+    j.at("method").get_to(t.method);
   }
 }
 
@@ -407,9 +410,14 @@ LocateResult::LocateResult()
 
 void Worker::do_execute(const std::string& id, const LocateTask& task) {
   // TODO support task.grayscale
-  std::cerr << "executing locate task" << std::endl;
+  if (FLAGS_visualize) {
+    std::cerr << "executing locate task" << std::endl;
+  }
+  if (task.region.size() < 4 || task.region[2] <= 0 || task.region[3] <= 0) {
+    print_result(id, false, "region error");
+    return;
+  }
 
-  // TODO deal with w=0 and h=0
   cv::Mat captured_bgra = captureScreenMat(task.region[0], task.region[1], task.region[2], task.region[3]);
   if (!captured_bgra.data) {
     print_result(id, false, "captured screen without data");
@@ -457,6 +465,31 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
 
   cv::Mat& capture_processed = mat_exchanger ? *mat_exchanger : captured_bgr;
   bool locate_on_screen = task.mode.empty() || task.mode == "screen";
+  std::unique_ptr<cv::Mat> mask;
+  if (!task.mask.empty()) {
+    std::cerr << "loading mask:" << task.mask << std::endl;
+    std::unique_ptr<cv::Mat> tmp = std::make_unique<cv::Mat>();
+    if (!read_image(task.mask, *tmp)) {
+      std::cerr << "[ERROR] can't load mask: " << task.mask << std::endl;
+      print_result(id, false, "can't load mask");
+      return;
+    }
+    if (locate_on_screen) {
+      // mask's size determined by each image in task.images
+      mask = std::move(tmp);
+    }
+    else {
+      // mask's size is fixed
+      mask = std::make_unique<cv::Mat>();
+      cv::resize(*tmp, *mask, cv::Size(capture_processed.cols, capture_processed.rows));
+    }
+  }
+  if (FLAGS_visualize) {
+    std::unique_ptr<char[]> buf(new char[size_t(128)]);
+    const std::vector<int>& rg = task.region;
+    int size = std::snprintf(buf.get(), 128, "/loc_%d_%d_%d_%d.png", rg[0], rg[1], rg[2], rg[3]);
+    cv::imwrite(FLAGS_output + buf.get(), capture_processed);
+  }
   LocateResult loc_result;
 
   std::mutex mut;
@@ -479,24 +512,49 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
         cv::Mat image;
         if (!read_image(task.images[image_index], image)) {
           std::cerr << "[ERROR] can't load the image: " << task.images[image_index] << std::endl;
-          //print_result(id, false, "can't load the image");
+          print_result(id, false, "can't load the image");
           return;
         }
 
-        // TODO load mask and use it
-        // TM_CCOEFF_NORMED's range -1~1, and the best matching is maxLoc
-        auto match_method = cv::TemplateMatchModes::TM_CCOEFF_NORMED; // TM_CCORR_NORMED;
+        // TM_CCORR_NORMED is faster than TM_CCOEFF_NORMED when mask is enabled,
+        // but TM_CCORR_NORMED sometimes is not accurate enough.
+        // TM_CCOEFF_NORMED and TM_CCORR_NORMED range in -1~1, and the best matching is maxLoc.
+        auto match_method = cv::TemplateMatchModes(task.method);
         cv::Mat result;
         if (locate_on_screen) {
-          cv::matchTemplate(capture_processed, image, result, match_method);
+          if (image.rows > capture_processed.rows || image.cols > capture_processed.cols) {
+            std::cerr << "[ERROR] template's size out of range" << std::endl;
+            print_result(id, false, "template's size out of range");
+            return;
+          }
+          if (!mask) {
+            cv::matchTemplate(capture_processed, image, result, match_method);
+          }
+          else if (mask->cols != image.cols || mask->rows != image.rows) {
+            cv::Mat resized_mask;
+            cv::resize(*mask, resized_mask, cv::Size(image.cols, image.rows));
+            cv::matchTemplate(capture_processed, image, result, match_method, resized_mask);
+          }
+          else {
+            cv::matchTemplate(capture_processed, image, result, match_method, *mask);
+          }
         }
         else {
-          cv::matchTemplate(image, capture_processed, result, match_method);
+          if (capture_processed.rows > image.rows || capture_processed.cols > image.cols) {
+            std::cerr << "[ERROR] template's size out of range" << std::endl;
+            print_result(id, false, "template's size out of range");
+            return;
+          }
+          cv::matchTemplate(image, capture_processed, result, match_method, mask ? *mask : cv::noArray());
         }
 
         double minVal, maxVal;
         cv::Point minLoc, maxLoc;
         cv::minMaxLoc(result, &minVal, &maxVal, &minLoc, &maxLoc, cv::Mat());
+        if (FLAGS_visualize) {
+          std::cerr << "x:" << maxLoc.x << ", y:" << maxLoc.y << ", score:" << (maxVal + 1) / 2
+            << ", index:" << image_index << std::endl;
+        }
 
         std::lock_guard<std::mutex> locker(mut);
         if ((maxVal + 1) / 2 > loc_result.score) {
@@ -523,53 +581,6 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
     threads[i]->join();
   }
 
-//  for (size_t i = 0; i < task.images.size(); i++) {
-//    cv::Mat image;
-//    if (!read_image(task.images[i], image)) {
-//      print_result(id, false, "can't load the image");
-//      return;
-//    }
-//
-//    // TODO load mask and use it
-//    // TM_CCOEFF_NORMED's range -1~1, and the best matching is maxLoc
-//    auto match_method = cv::TemplateMatchModes::TM_CCOEFF_NORMED; // TM_CCORR_NORMED;
-//    cv::Mat result;
-//    if (locate_on_screen) {
-//      cv::matchTemplate(capture_processed, image, result, match_method);
-//    }
-//    else {
-//      cv::matchTemplate(image, capture_processed, result, match_method);
-//    }
-//    //std::cerr << "matchTemplate finished " << std::endl;
-//
-//    double minVal, maxVal;
-//    cv::Point minLoc, maxLoc;
-//    cv::minMaxLoc(result, &minVal, &maxVal, &minLoc, &maxLoc, cv::Mat());
-//    if ((maxVal + 1) / 2 > loc_result.score) {
-//      loc_result.score = (maxVal + 1) / 2;
-//      loc_result.located = int(i);
-//      if (locate_on_screen) {
-////      locate_on_screen ? (task.region[0] + (with_scale ? int(maxLoc.x / task.scale) : maxLoc.x)) : maxLoc.x,
-////      locate_on_screen ? (task.region[1] + (with_scale ? int(maxLoc.y / task.scale) : maxLoc.y)) : maxLoc.y,
-////      locate_on_screen ? (with_scale ? int(image.cols / task.scale) : image.cols) : captured.cols,
-////      locate_on_screen ? (with_scale ? int(image.rows / task.scale) : image.rows) : captured.rows
-//        loc_result.region.x = task.region[0] + maxLoc.x * captured_bgr.cols / resize->width;
-//        loc_result.region.y = task.region[1] + maxLoc.y * captured_bgr.rows / resize->height;
-//        loc_result.region.width = image.cols * captured_bgr.cols / resize->width;
-//        loc_result.region.height = image.rows * captured_bgr.rows / resize->height;
-//      }
-//      else {
-//        loc_result.region.x = maxLoc.x;
-//        loc_result.region.y = maxLoc.y;
-//        loc_result.region.width = resize->width;
-//        loc_result.region.height = resize->height;
-//      }
-//    }
-//    // if confidence is not speicifed, we'll locate all images and get the best one
-//    if (task.confidence > 0.00001 && loc_result.score > task.confidence) {
-//      break;
-//    }
-//  }
   if (loc_result.located >= 0 && loc_result.score >= task.confidence) {
     cv::Rect& rc = loc_result.region;
     json result = { loc_result.located, rc.x, rc.y, rc.width, rc.height, float(loc_result.score) };
