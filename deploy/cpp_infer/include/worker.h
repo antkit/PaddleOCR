@@ -22,17 +22,20 @@ struct OcrTask {
   bool cls;
 };
 
+// locate images on screen or locate image(captured on screen) in images
 struct LocateTask {
   LocateTask();
 
   std::vector<std::string> images;
-  std::vector<int> region; // screen region
+  std::vector<int> region; // screen's region or images's region
   float confidence;
 
   std::vector<std::string> actions; // (flip, grayscale,)
-  std::string mode; // screen | images, locate on/in
+  std::string mode; // images_on_screen | screen_in_images | images_in_image | image_in_images
   std::string mask;
   int method;
+
+  std::string image;
 };
 
 struct PixelTask {
@@ -45,12 +48,19 @@ struct ScreenshotTask {
   std::string path; // path to save screenshot
 };
 
+struct LocateResult {
+  LocateResult();
+
+  int located; // index of the image located
+  cv::Rect region; // x, y, w, h
+  double score; // maxLoc value, 0~1
+};
+
 class Worker {
 public:
   Worker();
   ~Worker();
 
-  bool busy();
   void execute(const Task& task);
 
 protected:
@@ -60,6 +70,9 @@ protected:
   void do_execute(const std::string& id, const LocateTask& task);
   void do_execute(const std::string& id, const PixelTask& task);
   void do_execute(const std::string& id, const ScreenshotTask& task);
+
+  std::shared_ptr<LocateResult> do_locate(const std::string& id, const cv::Mat& image, const std::vector<std::string>& images,
+    const std::string& mask, const std::vector<std::string>& actions, const std::string& mode, int method, float confidence);
 
   void print_result(const std::string& id, bool success, const std::string& content);
   void print_result(const std::string& id, bool success, const std::vector<PaddleOCR::OCRPredictResult>& ocr_result);

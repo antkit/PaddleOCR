@@ -177,20 +177,16 @@ cv::Mat captureScreenMat(int x, int y, int width, int height)
 }
 #endif // _WIN32
 
-OcrTask::OcrTask()
-  : scale(1.0), det(true), rec(true), cls(false) {
-}
-
-LocateTask::LocateTask()
-  : confidence(0), method(5) {
-}
-
 void from_json(const json& j, Task& t) {
   j.at("id").get_to(t.id);
   j.at("command").get_to(t.command);
   if (j.contains("content")) {
     j.at("content").get_to(t.content);
   }
+}
+
+OcrTask::OcrTask()
+  : scale(1.0), det(true), rec(true), cls(false) {
 }
 
 void from_json(const json& j, OcrTask& t) {
@@ -213,6 +209,10 @@ void from_json(const json& j, OcrTask& t) {
   }
 }
 
+LocateTask::LocateTask()
+  : confidence(0), method(5) {
+}
+
 void from_json(const json& j, LocateTask& t) {
   j.at("images").get_to(t.images);
   j.at("region").get_to(t.region);
@@ -230,6 +230,9 @@ void from_json(const json& j, LocateTask& t) {
   }
   if (j.contains("method")) {
     j.at("method").get_to(t.method);
+  }
+  if (j.contains("image")) {
+    j.at("image").get_to(t.image);
   }
 }
 
@@ -258,10 +261,6 @@ Worker::Worker() {
 }
 
 Worker::~Worker() {
-}
-
-bool Worker::busy() {
-  return false;
 }
 
 void Worker::execute(const Task& task) {
@@ -396,14 +395,6 @@ void from_json(const json& j, ActionFlipParams& a) {
   }
 }
 
-struct LocateResult {
-  LocateResult();
-
-  int located; // index of the image located
-  cv::Rect region; // x, y, w, h
-  double score; // maxLoc value, 0~1
-};
-
 LocateResult::LocateResult()
   : located(-1), score(0) {
 }
@@ -413,139 +404,226 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
   if (FLAGS_visualize) {
     std::cerr << "executing locate task" << std::endl;
   }
-  if (task.region.size() < 4 || task.region[2] <= 0 || task.region[3] <= 0) {
-    print_result(id, false, "region error");
+  if (task.method != cv::TemplateMatchModes::TM_CCOEFF_NORMED && task.method != cv::TemplateMatchModes::TM_CCORR_NORMED) {
+    print_result(id, false, "method error");
     return;
   }
 
-  cv::Mat captured_bgra = captureScreenMat(task.region[0], task.region[1], task.region[2], task.region[3]);
-  if (!captured_bgra.data) {
-    print_result(id, false, "captured screen without data");
-    return;
+  std::string mode = task.mode;
+  std::shared_ptr<LocateResult> loc_result;
+  if (task.mode.empty() || task.mode == "images_on_screen" || task.mode == "screen_in_images") {
+    std::shared_ptr<cv::Mat> image(new cv::Mat());
+    if (task.region.size() < 4 || task.region[2] <= 0 || task.region[3] <= 0) {
+      print_result(id, false, "region error");
+      return;
+    }
+    cv::Mat captured_bgra = captureScreenMat(task.region[0], task.region[1], task.region[2], task.region[3]);
+    if (!captured_bgra.data) {
+      print_result(id, false, "captured screen without data");
+      return;
+    }
+
+    cv::cvtColor(captured_bgra, *image, cv::COLOR_BGRA2BGR);
+    if (FLAGS_visualize) {
+      std::unique_ptr<char[]> buf(new char[size_t(128)]);
+      const std::vector<int>& rg = task.region;
+      std::snprintf(buf.get(), 128, "/loc_%d_%d_%d_%d.png", rg[0], rg[1], rg[2], rg[3]);
+      cv::imwrite(FLAGS_output + buf.get(), *image);
+    }
+
+    mode = task.mode.empty() || task.mode == "images_on_screen" ? "images_in_image" : "image_in_images";
+    loc_result = do_locate(id, *image, task.images, task.mask, task.actions, mode, task.method, task.confidence);
+  }
+  else {
+    if (!task.region.empty() && (task.region.size() != 4 || task.region[0] < 0 || task.region[1] < 0 || task.region[2] <= 0 || task.region[3] <= 0)) {
+      print_result(id, false, "region error");
+      return;
+    }
+    std::shared_ptr<cv::Mat> file_image(new cv::Mat());
+    if (!read_image(task.image, *file_image)) {
+      std::cerr << "[ERROR] can't load the image: " << task.image << std::endl;
+      print_result(id, false, "failed load image");
+      return;
+    }
+    cv::Mat image = task.region.empty() ? *file_image : cv::Mat();
+    if (!task.region.empty()) {
+      if (task.region.size() != 4 || task.region[0] < 0 || task.region[1] < 0 || task.region[2] <= 0 || task.region[3] <= 0) {
+        print_result(id, false, "region error");
+        return;
+      }
+      if (task.region[0] + task.region[2] > file_image->cols || task.region[1] + task.region[3] > file_image->rows) {
+        print_result(id, false, "region exceeded");
+        return;
+      }
+      cv::Rect crop(task.region[0], task.region[1], task.region[2], task.region[3]);
+      image = (*file_image)(crop);
+    }
+    if (FLAGS_visualize) {
+      std::unique_ptr<char[]> buf(new char[size_t(128)]);
+      if (!task.region.empty()) {
+        const std::vector<int>& rg = task.region;
+        std::snprintf(buf.get(), 128, "/loc_%d_%d_%d_%d.png", rg[0], rg[1], rg[2], rg[3]);
+      }
+      else {
+        std::snprintf(buf.get(), 128, "/loc_image.png");
+      }
+      cv::imwrite(FLAGS_output + buf.get(), image);
+    }
+
+    loc_result = do_locate(id, image, task.images, task.mask, task.actions, mode, task.method, task.confidence);
   }
 
-  cv::Mat captured_bgr;
-  cv::cvtColor(captured_bgra, captured_bgr, cv::COLOR_BGRA2BGR);
+  if (loc_result) {
+    if (loc_result->located >= 0 && loc_result->score >= task.confidence) {
+      //if (mode == "images_in_image") {
+      if (mode == "images_in_image" && !task.region.empty()) {
+        loc_result->region.x += task.region[0];
+        loc_result->region.y += task.region[1];
+      }
+      cv::Rect& rc = loc_result->region;
+      json result = { loc_result->located, rc.x, rc.y, rc.width, rc.height, float(loc_result->score) };
+      print_result(id, true, result.dump());
+      return;
+    }
+    print_result(id, false, "locate failed");
+  }
+}
 
-  std::unique_ptr<cv::Size> resize = std::make_unique<cv::Size>(captured_bgr.cols, captured_bgr.rows);
+// mode:
+//  - images_in_image
+//  - image_in_images
+std::shared_ptr<LocateResult> Worker::do_locate(
+  const std::string& id,
+  const cv::Mat& image,
+  const std::vector<std::string>& images,
+  const std::string& mask,
+  const std::vector<std::string>& actions,
+  const std::string& mode,
+  int method,
+  float confidence
+) {
+  // TODO support task.grayscale
+  if (mode != "images_in_image" && mode != "image_in_images") {
+    print_result(id, false, "mode error");
+    return nullptr;
+  }
+  if (method != cv::TemplateMatchModes::TM_CCOEFF_NORMED && method != cv::TemplateMatchModes::TM_CCORR_NORMED) {
+    print_result(id, false, "method error");
+    return nullptr;
+  }
+
+  std::unique_ptr<cv::Size> resize = std::make_unique<cv::Size>(image.cols, image.rows);
   std::unique_ptr<cv::Mat> mat_exchanger;
-  for (size_t i = 0; i < task.actions.size(); i++) {
-    std::cerr << "action:" << task.actions[i] << std::endl;
-    auto j = json::parse(task.actions[i], nullptr, false);
+  for (size_t i = 0; i < actions.size(); i++) {
+    std::cerr << "action:" << actions[i] << std::endl;
+    auto j = json::parse(actions[i], nullptr, false);
     if (j.is_discarded()) {
       print_result(id, false, "invalid action content in locate");
-      return;
+      return nullptr;
     }
     auto action = j.template get<LocateAction>();
     auto j2 = json::parse(action.params, nullptr, false);
     if (j2.is_discarded()) {
       print_result(id, false, "invalid action params in locate");
-      return;
+      return nullptr;
     }
     if (action.action == "resize") {
       auto params = j2.template get<ActionResizeParams>();
-      int width = params.width > 0 ? params.width : captured_bgr.cols;
-      int height = params.height > 0 ? params.height : captured_bgr.rows;
+      int width = params.width > 0 ? params.width : image.cols;
+      int height = params.height > 0 ? params.height : image.rows;
       resize = std::make_unique<cv::Size>(width, height);
       std::unique_ptr<cv::Mat> mat_output(new cv::Mat());
-      cv::resize(mat_exchanger ? *mat_exchanger : captured_bgr, *mat_output, *resize);
+      cv::resize(mat_exchanger ? *mat_exchanger : image, *mat_output, *resize);
       mat_exchanger = std::move(mat_output);
     }
     else if (action.action == "flip") {
       auto params = j2.template get<ActionFlipParams>();
       std::unique_ptr<cv::Mat> mat_output(new cv::Mat());
-      cv::flip(mat_exchanger ? *mat_exchanger : captured_bgr, *mat_output, params.code);
+      cv::flip(mat_exchanger ? *mat_exchanger : image, *mat_output, params.code);
       mat_exchanger = std::move(mat_output);
     }
     else if (action.action == "grayscale") {
       print_result(id, false, "not implemented grayscale in locate");
-      return;
+      return nullptr;
     }
   }
 
-  cv::Mat& capture_processed = mat_exchanger ? *mat_exchanger : captured_bgr;
-  bool locate_on_screen = task.mode.empty() || task.mode == "screen";
-  std::unique_ptr<cv::Mat> mask;
-  if (!task.mask.empty()) {
-    std::cerr << "loading mask:" << task.mask << std::endl;
+  const cv::Mat& capture_processed = mat_exchanger ? *mat_exchanger : image;
+  std::unique_ptr<cv::Mat> mask_image;
+  if (!mask.empty()) {
+    std::cerr << "loading mask:" << mask << std::endl;
     std::unique_ptr<cv::Mat> tmp = std::make_unique<cv::Mat>();
-    if (!read_image(task.mask, *tmp)) {
-      std::cerr << "[ERROR] can't load mask: " << task.mask << std::endl;
+    if (!read_image(mask, *tmp)) {
+      std::cerr << "[ERROR] can't load mask: " << mask << std::endl;
       print_result(id, false, "can't load mask");
-      return;
+      return nullptr;
     }
-    if (locate_on_screen) {
+    if (mode == "images_in_image") {
       // mask's size determined by each image in task.images
-      mask = std::move(tmp);
+      mask_image = std::move(tmp);
     }
     else {
       // mask's size is fixed
-      mask = std::make_unique<cv::Mat>();
-      cv::resize(*tmp, *mask, cv::Size(capture_processed.cols, capture_processed.rows));
+      mask_image = std::make_unique<cv::Mat>();
+      cv::resize(*tmp, *mask_image, cv::Size(capture_processed.cols, capture_processed.rows));
     }
   }
-  if (FLAGS_visualize) {
-    std::unique_ptr<char[]> buf(new char[size_t(128)]);
-    const std::vector<int>& rg = task.region;
-    int size = std::snprintf(buf.get(), 128, "/loc_%d_%d_%d_%d.png", rg[0], rg[1], rg[2], rg[3]);
-    cv::imwrite(FLAGS_output + buf.get(), capture_processed);
-  }
-  LocateResult loc_result;
 
+  std::shared_ptr<LocateResult> loc_result(new LocateResult());
   std::mutex mut;
   std::vector<std::shared_ptr<std::thread>> threads;
   std::size_t running_index = 0;
   // TODO thread number by param in task
-  for (size_t ti = 0; ti < 4 && ti < task.images.size(); ti++) {
-    std::shared_ptr<std::thread> t(new std::thread([&]{
+  for (size_t ti = 0; ti < 4 && ti < images.size(); ti++) {
+    std::shared_ptr<std::thread> t(new std::thread([&] {
       while (true) {
         size_t image_index;
         {
           std::lock_guard<std::mutex> locker(mut);
-          if (running_index >= task.images.size()) {
-            return;
+          if (running_index >= images.size()) {
+            return nullptr;
           }
           image_index = running_index++;
         }
 
         //std::cerr << "locating " << task.images[image_index] << std::endl;
-        cv::Mat image;
-        if (!read_image(task.images[image_index], image)) {
-          std::cerr << "[ERROR] can't load the image: " << task.images[image_index] << std::endl;
+        cv::Mat indexed_image;
+        if (!read_image(images[image_index], indexed_image)) {
+          std::cerr << "[ERROR] can't load the image: " << images[image_index] << std::endl;
           print_result(id, false, "can't load the image");
-          return;
+          return nullptr;
         }
 
         // TM_CCORR_NORMED is faster than TM_CCOEFF_NORMED when mask is enabled,
         // but TM_CCORR_NORMED sometimes is not accurate enough.
         // TM_CCOEFF_NORMED and TM_CCORR_NORMED range in -1~1, and the best matching is maxLoc.
-        auto match_method = cv::TemplateMatchModes(task.method);
+        auto match_method = cv::TemplateMatchModes(method);
         cv::Mat result;
-        if (locate_on_screen) {
-          if (image.rows > capture_processed.rows || image.cols > capture_processed.cols) {
+        if (mode == "images_in_image") {
+          if (indexed_image.rows > capture_processed.rows || indexed_image.cols > capture_processed.cols) {
             std::cerr << "[ERROR] template's size out of range" << std::endl;
             print_result(id, false, "template's size out of range");
-            return;
+            return nullptr;
           }
-          if (!mask) {
-            cv::matchTemplate(capture_processed, image, result, match_method);
+          if (!mask_image) {
+            cv::matchTemplate(capture_processed, indexed_image, result, match_method);
           }
-          else if (mask->cols != image.cols || mask->rows != image.rows) {
+          else if (mask_image->cols != indexed_image.cols || mask_image->rows != indexed_image.rows) {
             cv::Mat resized_mask;
-            cv::resize(*mask, resized_mask, cv::Size(image.cols, image.rows));
-            cv::matchTemplate(capture_processed, image, result, match_method, resized_mask);
+            cv::resize(*mask_image, resized_mask, cv::Size(indexed_image.cols, indexed_image.rows));
+            cv::matchTemplate(capture_processed, indexed_image, result, match_method, resized_mask);
           }
           else {
-            cv::matchTemplate(capture_processed, image, result, match_method, *mask);
+            cv::matchTemplate(capture_processed, indexed_image, result, match_method, *mask_image);
           }
         }
         else {
-          if (capture_processed.rows > image.rows || capture_processed.cols > image.cols) {
+          if (capture_processed.rows > indexed_image.rows || capture_processed.cols > indexed_image.cols) {
             std::cerr << "[ERROR] template's size out of range" << std::endl;
             print_result(id, false, "template's size out of range");
-            return;
+            return nullptr;
           }
-          cv::matchTemplate(image, capture_processed, result, match_method, mask ? *mask : cv::noArray());
+          cv::matchTemplate(indexed_image, capture_processed, result, match_method, mask_image ? *mask_image : cv::noArray());
         }
 
         double minVal, maxVal;
@@ -557,38 +635,30 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
         }
 
         std::lock_guard<std::mutex> locker(mut);
-        if ((maxVal + 1) / 2 > loc_result.score) {
-          loc_result.score = (maxVal + 1) / 2;
-          loc_result.located = int(image_index);
-          if (locate_on_screen) {
-            loc_result.region.x = task.region[0] + maxLoc.x * captured_bgr.cols / resize->width;
-            loc_result.region.y = task.region[1] + maxLoc.y * captured_bgr.rows / resize->height;
-            loc_result.region.width = image.cols * captured_bgr.cols / resize->width;
-            loc_result.region.height = image.rows * captured_bgr.rows / resize->height;
+        if ((maxVal + 1) / 2 > loc_result->score) {
+          loc_result->score = (maxVal + 1) / 2;
+          loc_result->located = int(image_index);
+          if (mode == "images_in_image") {
+            loc_result->region.x = maxLoc.x * image.cols / resize->width;
+            loc_result->region.y = maxLoc.y * image.rows / resize->height;
+            loc_result->region.width = indexed_image.cols * image.cols / resize->width;
+            loc_result->region.height = indexed_image.rows * image.rows / resize->height;
           }
           else {
-            loc_result.region.x = maxLoc.x;
-            loc_result.region.y = maxLoc.y;
-            loc_result.region.width = resize->width;
-            loc_result.region.height = resize->height;
+            loc_result->region.x = maxLoc.x;
+            loc_result->region.y = maxLoc.y;
+            loc_result->region.width = resize->width;
+            loc_result->region.height = resize->height;
           }
         }
       }
-    }));
+      }));
     threads.push_back(t);
   }
   for (size_t i = 0; i < threads.size(); i++) {
     threads[i]->join();
   }
-
-  if (loc_result.located >= 0 && loc_result.score >= task.confidence) {
-    cv::Rect& rc = loc_result.region;
-    json result = { loc_result.located, rc.x, rc.y, rc.width, rc.height, float(loc_result.score) };
-    print_result(id, true, result.dump());
-    return;
-  }
-
-  print_result(id, false, "locate failed");
+  return loc_result;
 }
 
 void Worker::do_execute(const std::string& id, const PixelTask& task) {
