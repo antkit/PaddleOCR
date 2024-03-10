@@ -16,7 +16,7 @@ struct OcrTask {
   std::string lang;
   std::string img; // img first then region on screen
   std::vector<int> region; // screen region
-  float scale;
+  std::vector<std::string> actions; // (flip, grayscale, resize)
   bool det;
   bool rec;
   bool cls;
@@ -30,7 +30,7 @@ struct LocateTask {
   std::vector<int> region; // screen's region or images's region
   float confidence;
 
-  std::vector<std::string> actions; // (flip, grayscale,)
+  std::vector<std::string> actions; // (flip, grayscale, resize)
   std::string mode; // images_on_screen | screen_in_images | images_in_image | image_in_images
   std::string mask;
   int method;

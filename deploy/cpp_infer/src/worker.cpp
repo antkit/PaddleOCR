@@ -18,6 +18,46 @@
 using json = nlohmann::json;
 using namespace PaddleOCR;
 
+struct Action {
+  std::string action;
+  std::string params;
+};
+
+void from_json(const json& j, Action& a) {
+  j.at("action").get_to(a.action);
+  if (j.contains("params")) {
+    j.at("params").get_to(a.params);
+  }
+}
+
+struct ActionResizeParams {
+  float factor; // use factor first
+  int width;
+  int height;
+};
+
+void from_json(const json& j, ActionResizeParams& a) {
+  if (j.contains("factor")) {
+    j.at("factor").get_to(a.factor);
+  }
+  if (j.contains("width")) {
+    j.at("width").get_to(a.width);
+  }
+  if (j.contains("height")) {
+    j.at("height").get_to(a.height);
+  }
+}
+
+struct ActionFlipParams {
+  int code;
+};
+
+void from_json(const json& j, ActionFlipParams& a) {
+  if (j.contains("code")) {
+    j.at("code").get_to(a.code);
+  }
+}
+
 struct PaddleResource {
   PaddleResource() {}
   PaddleResource(const std::string& m, const std::string& r, const std::string& d)
@@ -186,7 +226,7 @@ void from_json(const json& j, Task& t) {
 }
 
 OcrTask::OcrTask()
-  : scale(1.0), det(true), rec(true), cls(false) {
+  : det(true), rec(true), cls(false) {
 }
 
 void from_json(const json& j, OcrTask& t) {
@@ -194,9 +234,11 @@ void from_json(const json& j, OcrTask& t) {
   if (j.contains("img")) {
     j.at("img").get_to(t.img);
   }
-  j.at("region").get_to(t.region);
-  if (j.contains("scale")) {
-    j.at("scale").get_to(t.scale);
+  if (j.contains("region")) {
+    j.at("region").get_to(t.region);
+  }
+  if (j.contains("actions")) {
+    j.at("actions").get_to(t.actions);
   }
   if (j.contains("det")) {
     j.at("det").get_to(t.det);
@@ -313,85 +355,119 @@ void Worker::do_execute(const std::string& id, const OcrTask& task) {
     ppocr->reset_timer();
   }
 
-  // TODO deal with w=0 and h=0
-  cv::Mat img_with_alpha = captureScreenMat(task.region[0], task.region[1], task.region[2], task.region[3]);
-  if (!img_with_alpha.data) {
-    print_result(id, false, "captured screen without data");
-    return;
-  }
-  //cv::imwrite(FLAGS_output + "/screenshot.png", img_with_alpha);
-
-  //std::cerr << "\t ocr running..." << std::endl;
-  cv::Mat img = cv::Mat();
-  if (std::abs(task.scale - 1.0) > 0.0001) {
-    auto new_size = cv::Size(int(img_with_alpha.cols * task.scale), int(img_with_alpha.rows * task.scale));
-    cv::Mat scaled = cv::Mat();
-    cv::resize(img_with_alpha, scaled, new_size);
-    cv::cvtColor(scaled, img, cv::COLOR_BGRA2BGR);
+  std::shared_ptr<cv::Mat> image(new cv::Mat());
+  if (!task.img.empty()) {
+    cv::Mat file_image;
+    if (!read_image(task.img, file_image)) {
+      std::cerr << "[ERROR] can't load the image: " << task.img << std::endl;
+      print_result(id, false, "failed load image");
+      return;
+    }
+    if (!task.region.empty()) {
+      if (task.region.size() != 4 || task.region[0] < 0 || task.region[1] < 0 || task.region[2] <= 0 || task.region[3] <= 0) {
+        print_result(id, false, "region error");
+        return;
+      }
+      if (task.region[0] + task.region[2] > file_image.cols || task.region[1] + task.region[3] > file_image.rows) {
+        print_result(id, false, "region exceeded");
+        return;
+      }
+      cv::Rect crop(task.region[0], task.region[1], task.region[2], task.region[3]);
+      *image = file_image(crop);
+    }
   }
   else {
-    cv::cvtColor(img_with_alpha, img, cv::COLOR_BGRA2BGR);
+    if (task.region.size() < 4 || task.region[2] <= 0 || task.region[3] <= 0) {
+      print_result(id, false, "region error");
+      return;
+    }
+    cv::Mat captured_image = captureScreenMat(task.region[0], task.region[1], task.region[2], task.region[3]);
+    if (!captured_image.data) {
+      print_result(id, false, "captured screen without data");
+      return;
+    }
+    cv::cvtColor(captured_image, *image, cv::COLOR_BGRA2BGR);
   }
-  std::vector<OCRPredictResult> ocr_result = ppocr->ocr(img, FLAGS_det, FLAGS_rec, FLAGS_cls);
 
-  // revert scaling
-  if (std::abs(task.scale - 1.0) > 0.0001) {
+  std::unique_ptr<cv::Size> resize = std::make_unique<cv::Size>(image->cols, image->rows);
+  std::unique_ptr<cv::Mat> mat_exchanger;
+  for (size_t i = 0; i < task.actions.size(); i++) {
+    std::cerr << "action:" << task.actions[i] << std::endl;
+    auto j = json::parse(task.actions[i], nullptr, false);
+    if (j.is_discarded()) {
+      print_result(id, false, "invalid action content in ocr");
+      return;
+    }
+    auto action = j.template get<Action>();
+    auto j2 = json::parse(action.params, nullptr, false);
+    if (j2.is_discarded()) {
+      print_result(id, false, "invalid action params in ocr");
+      return;
+    }
+    if (action.action == "resize") {
+      auto params = j2.template get<ActionResizeParams>();
+      if (params.factor > 0) {
+        if (std::abs(params.factor - 1.0) > 0.00001) {
+          resize->width = int(image->cols * params.factor);
+          resize->height = int(image->rows * params.factor);
+        }
+      }
+      else {
+        if (params.width <= 0 || params.height <= 0) {
+          print_result(id, false, "invalid resize params in ocr");
+          return;
+        }
+        if (params.width != image->cols || params.height != image->rows) {
+          resize->width = params.width;
+          resize->height = params.height;
+        }
+      }
+      if (resize->width != image->cols || resize->height != image->rows) {
+        std::unique_ptr<cv::Mat> mat_output(new cv::Mat());
+        cv::resize(mat_exchanger ? *mat_exchanger : *image, *mat_output, *resize);
+        mat_exchanger = std::move(mat_output);
+      }
+    }
+    else if (action.action == "flip") {
+      auto params = j2.template get<ActionFlipParams>();
+      std::unique_ptr<cv::Mat> mat_output(new cv::Mat());
+      cv::flip(mat_exchanger ? *mat_exchanger : *image, *mat_output, params.code);
+      mat_exchanger = std::move(mat_output);
+    }
+    else if (action.action == "grayscale") {
+      print_result(id, false, "not implemented grayscale in ocr");
+    }
+  }
+
+  const cv::Mat& image_processed = mat_exchanger ? *mat_exchanger : *image;
+  std::vector<OCRPredictResult> ocr_result = ppocr->ocr(image_processed, FLAGS_det, FLAGS_rec, FLAGS_cls);
+
+  const std::vector<int>& rg = task.region;
+  if (FLAGS_visualize && FLAGS_det) {
+    std::unique_ptr<char[]> buf(new char[size_t(128)]);
+    int size = std::snprintf(buf.get(), 128, "ocr_%d_%d_%d_%d.png", rg[0], rg[1], rg[2], rg[3]);
+    Utility::VisualizeBboxes(image_processed, ocr_result, FLAGS_output + "/" + buf.get());
+  }
+
+  // revert scaling result to match original image
+  if (resize->width != image->cols || resize->height != image->rows) {
+    float scales[2] = { float(resize->width) / image->cols, float(resize->height) / image->rows };
+    size_t index = 0;
     for (std::vector<OCRPredictResult>::iterator p = ocr_result.begin(); p != ocr_result.end(); ++p) {
       for (std::vector<std::vector<int>>::iterator p2 = p->box.begin(); p2 != p->box.end(); ++p2) {
-        std::transform(p2->cbegin(), p2->cend(), p2->begin(), [task](int v) {
-          return int(std::round(v / task.scale));
+        std::transform(p2->cbegin(), p2->cend(), p2->begin(), [&](int v) {
+          return int(std::round(v / scales[index++ % 2]));
           });
       }
     }
   }
   //std::cerr << "\t ocr finished" << std::endl;
 
-  const std::vector<int>& rg = task.region;
   std::cerr << "predict screen: " << rg[0] << "," << rg[1] << "," << rg[2] << "," << rg[3] << std::endl;
   print_result(id, true, ocr_result);
-  if (FLAGS_visualize && FLAGS_det) {
-    std::unique_ptr<char[]> buf(new char[size_t(128)]);
-    int size = std::snprintf(buf.get(), 128, "ss_%d_%d_%d_%d.png", rg[0], rg[1], rg[2], rg[3]);
-    Utility::VisualizeBboxes(img_with_alpha, ocr_result, FLAGS_output + "/" + buf.get());
-  }
+
   if (FLAGS_benchmark) {
     ppocr->benchmark_log(1);
-  }
-}
-
-struct LocateAction {
-  std::string action;
-  std::string params;
-};
-
-void from_json(const json& j, LocateAction& a) {
-  j.at("action").get_to(a.action);
-  if (j.contains("params")) {
-    j.at("params").get_to(a.params);
-  }
-}
-
-struct ActionResizeParams {
-  int width;
-  int height;
-};
-
-void from_json(const json& j, ActionResizeParams& a) {
-  if (j.contains("width")) {
-    j.at("width").get_to(a.width);
-  }
-  if (j.contains("height")) {
-    j.at("height").get_to(a.height);
-  }
-}
-
-struct ActionFlipParams {
-  int code;
-};
-
-void from_json(const json& j, ActionFlipParams& a) {
-  if (j.contains("code")) {
-    j.at("code").get_to(a.code);
   }
 }
 
@@ -475,7 +551,6 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
 
   if (loc_result) {
     if (loc_result->located >= 0 && loc_result->score >= task.confidence) {
-      //if (mode == "images_in_image") {
       if (mode == "images_in_image" && !task.region.empty()) {
         loc_result->region.x += task.region[0];
         loc_result->region.y += task.region[1];
@@ -521,7 +596,7 @@ std::shared_ptr<LocateResult> Worker::do_locate(
       print_result(id, false, "invalid action content in locate");
       return nullptr;
     }
-    auto action = j.template get<LocateAction>();
+    auto action = j.template get<Action>();
     auto j2 = json::parse(action.params, nullptr, false);
     if (j2.is_discarded()) {
       print_result(id, false, "invalid action params in locate");
@@ -529,12 +604,25 @@ std::shared_ptr<LocateResult> Worker::do_locate(
     }
     if (action.action == "resize") {
       auto params = j2.template get<ActionResizeParams>();
-      int width = params.width > 0 ? params.width : image.cols;
-      int height = params.height > 0 ? params.height : image.rows;
-      resize = std::make_unique<cv::Size>(width, height);
-      std::unique_ptr<cv::Mat> mat_output(new cv::Mat());
-      cv::resize(mat_exchanger ? *mat_exchanger : image, *mat_output, *resize);
-      mat_exchanger = std::move(mat_output);
+      if (params.factor > 0) {
+        if (std::abs(params.factor - 1.0) > 0.00001) {
+          resize->width = int(image.cols * params.factor);
+          resize->height = int(image.rows * params.factor);
+        }
+      }
+      else {
+        if (params.width <= 0 || params.height <= 0) {
+          print_result(id, false, "invalid resize params in ocr");
+          return nullptr;
+        }
+        resize->width = params.width;
+        resize->height = params.height;
+      }
+      if (resize->width != image.cols || resize->height != image.rows) {
+        std::unique_ptr<cv::Mat> mat_output(new cv::Mat());
+        cv::resize(mat_exchanger ? *mat_exchanger : image, *mat_output, *resize);
+        mat_exchanger = std::move(mat_output);
+      }
     }
     else if (action.action == "flip") {
       auto params = j2.template get<ActionFlipParams>();
@@ -548,7 +636,7 @@ std::shared_ptr<LocateResult> Worker::do_locate(
     }
   }
 
-  const cv::Mat& capture_processed = mat_exchanger ? *mat_exchanger : image;
+  const cv::Mat& image_processed = mat_exchanger ? *mat_exchanger : image;
   std::unique_ptr<cv::Mat> mask_image;
   if (!mask.empty()) {
     std::cerr << "loading mask:" << mask << std::endl;
@@ -565,7 +653,7 @@ std::shared_ptr<LocateResult> Worker::do_locate(
     else {
       // mask's size is fixed
       mask_image = std::make_unique<cv::Mat>();
-      cv::resize(*tmp, *mask_image, cv::Size(capture_processed.cols, capture_processed.rows));
+      cv::resize(*tmp, *mask_image, cv::Size(image_processed.cols, image_processed.rows));
     }
   }
 
@@ -600,30 +688,30 @@ std::shared_ptr<LocateResult> Worker::do_locate(
         auto match_method = cv::TemplateMatchModes(method);
         cv::Mat result;
         if (mode == "images_in_image") {
-          if (indexed_image.rows > capture_processed.rows || indexed_image.cols > capture_processed.cols) {
+          if (indexed_image.rows > image_processed.rows || indexed_image.cols > image_processed.cols) {
             std::cerr << "[ERROR] template's size out of range" << std::endl;
             print_result(id, false, "template's size out of range");
             return nullptr;
           }
           if (!mask_image) {
-            cv::matchTemplate(capture_processed, indexed_image, result, match_method);
+            cv::matchTemplate(image_processed, indexed_image, result, match_method);
           }
           else if (mask_image->cols != indexed_image.cols || mask_image->rows != indexed_image.rows) {
             cv::Mat resized_mask;
             cv::resize(*mask_image, resized_mask, cv::Size(indexed_image.cols, indexed_image.rows));
-            cv::matchTemplate(capture_processed, indexed_image, result, match_method, resized_mask);
+            cv::matchTemplate(image_processed, indexed_image, result, match_method, resized_mask);
           }
           else {
-            cv::matchTemplate(capture_processed, indexed_image, result, match_method, *mask_image);
+            cv::matchTemplate(image_processed, indexed_image, result, match_method, *mask_image);
           }
         }
         else {
-          if (capture_processed.rows > indexed_image.rows || capture_processed.cols > indexed_image.cols) {
+          if (image_processed.rows > indexed_image.rows || image_processed.cols > indexed_image.cols) {
             std::cerr << "[ERROR] template's size out of range" << std::endl;
             print_result(id, false, "template's size out of range");
             return nullptr;
           }
-          cv::matchTemplate(indexed_image, capture_processed, result, match_method, mask_image ? *mask_image : cv::noArray());
+          cv::matchTemplate(indexed_image, image_processed, result, match_method, mask_image ? *mask_image : cv::noArray());
         }
 
         double minVal, maxVal;
