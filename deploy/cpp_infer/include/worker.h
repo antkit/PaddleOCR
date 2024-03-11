@@ -71,8 +71,10 @@ protected:
   void do_execute(const std::string& id, const PixelTask& task);
   void do_execute(const std::string& id, const ScreenshotTask& task);
 
+  std::pair<bool, std::shared_ptr<cv::Mat>> apply_actions(const std::string& id, const cv::Mat& image, const std::vector<std::string>& actions);
+
   std::shared_ptr<LocateResult> do_locate(const std::string& id, const cv::Mat& image, const std::vector<std::string>& images,
-    const std::string& mask, const std::vector<std::string>& actions, const std::string& mode, int method, float confidence);
+    const std::string& mask, const std::string& mode, int method, float confidence);
 
   void print_result(const std::string& id, bool success, const std::string& content);
   void print_result(const std::string& id, bool success, const std::vector<PaddleOCR::OCRPredictResult>& ocr_result);
