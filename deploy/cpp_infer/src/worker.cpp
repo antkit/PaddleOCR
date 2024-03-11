@@ -241,8 +241,8 @@ OcrTask::OcrTask()
 
 void from_json(const json& j, OcrTask& t) {
   j.at("lang").get_to(t.lang);
-  if (j.contains("img")) {
-    j.at("img").get_to(t.img);
+  if (j.contains("image")) {
+    j.at("image").get_to(t.image);
   }
   if (j.contains("region")) {
     j.at("region").get_to(t.region);
@@ -267,7 +267,9 @@ LocateTask::LocateTask()
 
 void from_json(const json& j, LocateTask& t) {
   j.at("images").get_to(t.images);
-  j.at("region").get_to(t.region);
+  if (j.contains("region")) {
+    j.at("region").get_to(t.region);
+  }
   if (j.contains("confidence")) {
     j.at("confidence").get_to(t.confidence);
   }
@@ -296,6 +298,10 @@ void from_json(const json& j, PixelTask& t) {
 void from_json(const json& j, ScreenshotTask& t) {
   j.at("region").get_to(t.region);
   j.at("path").get_to(t.path);
+}
+
+LocateResult::LocateResult()
+  : located(-1), score(0) {
 }
 
 std::mutex Worker::output_mutex_;
@@ -361,9 +367,9 @@ std::shared_ptr<PPOCR> Worker::ppocr_by_lang(const std::string& lang) {
 
 std::pair<bool, std::shared_ptr<cv::Mat>> Worker::apply_actions(const std::string& id, const cv::Mat& image, const std::vector<std::string>& actions) {
   std::unique_ptr<cv::Mat> result_image;
-  for (size_t i = 0; i < actions.size(); i++) {
-    std::cerr << "action:" << actions[i] << std::endl;
-    auto j = json::parse(actions[i], nullptr, false);
+  for (auto p = actions.begin(); p != actions.end(); ++p) {
+    std::cerr << "action:" << *p << std::endl;
+    auto j = json::parse(*p, nullptr, false);
     if (j.is_discarded()) {
       print_result(id, false, "invalid action content");
       return std::make_pair(false, nullptr);
@@ -374,43 +380,59 @@ std::pair<bool, std::shared_ptr<cv::Mat>> Worker::apply_actions(const std::strin
       print_result(id, false, "invalid action params");
       return std::make_pair(false, nullptr);
     }
-    if (action.action == "resize") {
-      const cv::Mat& target_image = result_image ? *result_image : image;
-      std::unique_ptr<cv::Size> resize = std::make_unique<cv::Size>(target_image.cols, target_image.rows);
 
-      auto params = j2.template get<ActionResizeParams>();
-      if (params.factor > 0) {
-        if (std::abs(params.factor - 1.0) > 0.00001) {
-          resize->width = int(image.cols * params.factor);
-          resize->height = int(image.rows * params.factor);
+    const cv::Mat& target_image = result_image ? *result_image : image;
+    if (action.action == "resize") {
+      auto size = std::make_unique<cv::Size>(target_image.cols, target_image.rows);
+      auto ap = j2.template get<ActionResizeParams>();
+      if (ap.factor > 0) {
+        if (std::abs(ap.factor - 1.0) > 0.00001) {
+          size->width = int(target_image.cols * ap.factor);
+          size->height = int(target_image.rows * ap.factor);
         }
       }
       else {
-        if (params.width <= 0 || params.height <= 0) {
+        if (ap.width <= 0 || ap.height <= 0) {
           print_result(id, false, "invalid resize params");
           return std::make_pair(false, nullptr);
         }
-        if (params.width != image.cols || params.height != image.rows) {
-          resize->width = params.width;
-          resize->height = params.height;
+        if (ap.width != target_image.cols || ap.height != target_image.rows) {
+          size->width = ap.width;
+          size->height = ap.height;
         }
       }
 
-      if (resize->width != target_image.cols || resize->height != target_image.rows) {
+      if (size->width != target_image.cols || size->height != target_image.rows) {
         std::unique_ptr<cv::Mat> mat_output(new cv::Mat());
-        cv::resize(target_image, *mat_output, *resize);
+        cv::resize(target_image, *mat_output, *size);
         result_image = std::move(mat_output);
       }
     }
     else if (action.action == "flip") {
-      auto params = j2.template get<ActionFlipParams>();
+      auto ap = j2.template get<ActionFlipParams>();
       std::unique_ptr<cv::Mat> mat_output(new cv::Mat());
-      cv::flip(result_image ? *result_image : image, *mat_output, params.code);
+      cv::flip(target_image, *mat_output, ap.code);
       result_image = std::move(mat_output);
     }
+    //else if (action.action == "crop") {
+    //  auto ap = j2.template get<ActionCropParams>();
+    //  if (ap.region.size() < 4 || ap.region[0] < 0 || ap.region[1] < 0 || ap.region[2] < 0 || ap.region[3] < 0) {
+    //    print_result(id, false, "invalid crop params");
+    //    return std::make_pair(false, nullptr);
+    //  }
+    //  if (ap.region[0] + ap.region[2] > target_image.cols || ap.region[1] + ap.region[3] > target_image.rows) {
+    //    print_result(id, false, "crop region exceeded");
+    //    return std::make_pair(false, nullptr);
+    //  }
+    //  cv::Rect crop(ap.region[0], ap.region[1], ap.region[2], ap.region[3]);
+    //  if (!result_image) {
+    //    result_image = std::unique_ptr<cv::Mat>(new cv::Mat());
+    //  }
+    //  *result_image = target_image(crop);
+    //}
     else if (action.action == "grayscale") {
       // TODO support grayscale
-      print_result(id, false, "not implemented grayscale in ocr");
+      print_result(id, false, "not implemented grayscale");
       return std::make_pair(false, nullptr);
     }
   }
@@ -424,10 +446,10 @@ void Worker::do_execute(const std::string& id, const OcrTask& task) {
   }
 
   std::shared_ptr<cv::Mat> image(new cv::Mat());
-  if (!task.img.empty()) {
+  if (!task.image.empty()) {
     cv::Mat file_image;
-    if (!read_image(task.img, file_image)) {
-      std::cerr << "[ERROR] can't load the image: " << task.img << std::endl;
+    if (!read_image(task.image, file_image)) {
+      std::cerr << "[ERROR] can't load the image: " << task.image << std::endl;
       print_result(id, false, "failed load image");
       return;
     }
@@ -465,10 +487,28 @@ void Worker::do_execute(const std::string& id, const OcrTask& task) {
   const cv::Mat& final_image = mat_exchanger.second ? *mat_exchanger.second : *image;
   std::vector<OCRPredictResult> ocr_result = ppocr->ocr(final_image, FLAGS_det, FLAGS_rec, FLAGS_cls);
 
-  const std::vector<int>& rg = task.region;
   if (FLAGS_visualize && FLAGS_det) {
     std::unique_ptr<char[]> buf(new char[size_t(128)]);
-    int size = std::snprintf(buf.get(), 128, "ocr_%d_%d_%d_%d.png", rg[0], rg[1], rg[2], rg[3]);
+    if (!task.region.empty()) {
+      std::snprintf(buf.get(), 128, "/ocr_%d_%d_%d_%d.png", task.region[0], task.region[1], task.region[2], task.region[3]);
+    }
+    else {
+      bool formatted = false;
+      for (auto p = task.actions.begin(); p != task.actions.end(); ++p) {
+        auto j = json::parse(*p, nullptr, false);
+        auto action = j.template get<Action>();
+        if (action.action == "crop") {
+          auto j2 = json::parse(action.params, nullptr, false);
+          auto ap = j2.template get<ActionCropParams>();
+          std::snprintf(buf.get(), 128, "/ocr_%d_%d_%d_%d.png", ap.region[0], ap.region[1], ap.region[2], ap.region[3]);
+          formatted = true;
+          break;
+        }
+      }
+      if (!formatted) {
+        std::snprintf(buf.get(), 128, "/ocr_image.png");
+      }
+    }
     Utility::VisualizeBboxes(final_image, ocr_result, FLAGS_output + "/" + buf.get());
   }
 
@@ -486,16 +526,12 @@ void Worker::do_execute(const std::string& id, const OcrTask& task) {
   }
   //std::cerr << "\t ocr finished" << std::endl;
 
-  std::cerr << "predict screen: " << rg[0] << "," << rg[1] << "," << rg[2] << "," << rg[3] << std::endl;
+  std::cerr << "predict screen: " << task.region[0] << "," << task.region[1] << "," << task.region[2] << "," << task.region[3] << std::endl;
   print_result(id, true, ocr_result);
 
   if (FLAGS_benchmark) {
     ppocr->benchmark_log(1);
   }
-}
-
-LocateResult::LocateResult()
-  : located(-1), score(0) {
 }
 
 void Worker::do_execute(const std::string& id, const LocateTask& task) {
@@ -520,14 +556,10 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
       return;
     }
 
-    cv::cvtColor(captured_bgra, *image, cv::COLOR_BGRA2BGR);
     mode = task.mode.empty() || task.mode == "images_on_screen" ? "images_in_image" : "image_in_images";
+    cv::cvtColor(captured_bgra, *image, cv::COLOR_BGRA2BGR);
   }
   else {
-    if (!task.region.empty() && (task.region.size() != 4 || task.region[0] < 0 || task.region[1] < 0 || task.region[2] <= 0 || task.region[3] <= 0)) {
-      print_result(id, false, "region error");
-      return;
-    }
     std::shared_ptr<cv::Mat> file_image(new cv::Mat());
     if (!read_image(task.image, *file_image)) {
       std::cerr << "[ERROR] can't load the image: " << task.image << std::endl;
@@ -540,7 +572,7 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
     }
     else {
       if (task.region.size() != 4 || task.region[0] < 0 || task.region[1] < 0 || task.region[2] <= 0 || task.region[3] <= 0) {
-        print_result(id, false, "region error");
+        print_result(id, false, "region value error");
         return;
       }
       if (task.region[0] + task.region[2] > file_image->cols || task.region[1] + task.region[3] > file_image->rows) {
@@ -552,6 +584,12 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
     }
   }
 
+  auto mat_exchanger = apply_actions(id, *image, task.actions);
+  if (!mat_exchanger.first) {
+    return;
+  }
+
+  const cv::Mat& final_image = mat_exchanger.second ? *mat_exchanger.second : *image;
   if (FLAGS_visualize) {
     std::unique_ptr<char[]> buf(new char[size_t(128)]);
     if (!task.region.empty()) {
@@ -560,15 +598,9 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
     else {
       std::snprintf(buf.get(), 128, "/loc_image.png");
     }
-    cv::imwrite(FLAGS_output + buf.get(), *image);
+    cv::imwrite(FLAGS_output + buf.get(), final_image);
   }
 
-  auto mat_exchanger = apply_actions(id, *image, task.actions);
-  if (!mat_exchanger.first) {
-    return;
-  }
-
-  const cv::Mat& final_image = mat_exchanger.second ? *mat_exchanger.second : *image;
   std::shared_ptr<LocateResult> loc_result = do_locate(id, final_image, task.images, task.mask, mode, task.method, task.confidence);
 
   if (loc_result) {

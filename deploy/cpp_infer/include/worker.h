@@ -14,7 +14,7 @@ struct OcrTask {
   OcrTask();
 
   std::string lang;
-  std::string img; // img first then region on screen
+  std::string image; // img first then region on screen
   std::vector<int> region; // screen region
   std::vector<std::string> actions; // (flip, grayscale, resize)
   bool det;
