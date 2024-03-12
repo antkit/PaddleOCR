@@ -447,8 +447,7 @@ void Worker::do_execute(const std::string& id, const OcrTask& task) {
 
   std::shared_ptr<cv::Mat> image(new cv::Mat());
   if (!task.image.empty()) {
-    cv::Mat file_image;
-    if (!read_image(task.image, file_image)) {
+    if (!read_image(task.image, *image)) {
       std::cerr << "[ERROR] can't load the image: " << task.image << std::endl;
       print_result(id, false, "failed load image");
       return;
@@ -458,12 +457,14 @@ void Worker::do_execute(const std::string& id, const OcrTask& task) {
         print_result(id, false, "region error");
         return;
       }
-      if (task.region[0] + task.region[2] > file_image.cols || task.region[1] + task.region[3] > file_image.rows) {
+      if (task.region[0] + task.region[2] > image->cols || task.region[1] + task.region[3] > image->rows) {
         print_result(id, false, "region exceeded");
         return;
       }
       cv::Rect crop(task.region[0], task.region[1], task.region[2], task.region[3]);
-      *image = file_image(crop);
+      std::shared_ptr<cv::Mat> tmp_image = image;
+      image = std::shared_ptr<cv::Mat>(new cv::Mat());
+      *image = (*tmp_image)(crop);
     }
   }
   else {
@@ -524,9 +525,7 @@ void Worker::do_execute(const std::string& id, const OcrTask& task) {
       }
     }
   }
-  //std::cerr << "\t ocr finished" << std::endl;
 
-  std::cerr << "predict screen: " << task.region[0] << "," << task.region[1] << "," << task.region[2] << "," << task.region[3] << std::endl;
   print_result(id, true, ocr_result);
 
   if (FLAGS_benchmark) {
@@ -560,27 +559,25 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
     cv::cvtColor(captured_bgra, *image, cv::COLOR_BGRA2BGR);
   }
   else {
-    std::shared_ptr<cv::Mat> file_image(new cv::Mat());
-    if (!read_image(task.image, *file_image)) {
+    if (!read_image(task.image, *image)) {
       std::cerr << "[ERROR] can't load the image: " << task.image << std::endl;
       print_result(id, false, "failed load image");
       return;
     }
 
-    if (task.region.empty()) {
-      image = file_image;
-    }
-    else {
+    if (!task.region.empty()) {
       if (task.region.size() != 4 || task.region[0] < 0 || task.region[1] < 0 || task.region[2] <= 0 || task.region[3] <= 0) {
         print_result(id, false, "region value error");
         return;
       }
-      if (task.region[0] + task.region[2] > file_image->cols || task.region[1] + task.region[3] > file_image->rows) {
+      if (task.region[0] + task.region[2] > image->cols || task.region[1] + task.region[3] > image->rows) {
         print_result(id, false, "region exceeded");
         return;
       }
       cv::Rect crop(task.region[0], task.region[1], task.region[2], task.region[3]);
-      *image = (*file_image)(crop);
+      std::shared_ptr<cv::Mat> tmp_image = image;
+      image = std::shared_ptr<cv::Mat>(new cv::Mat());
+      *image = (*tmp_image)(crop);
     }
   }
 
