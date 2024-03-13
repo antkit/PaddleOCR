@@ -18,12 +18,14 @@
 using json = nlohmann::json;
 using namespace PaddleOCR;
 
+static const char* ALPHA_CHANNEL = "alpha_channel";
+
 struct Action {
   std::string action;
   std::string params;
 };
 
-void from_json(const json& j, Action& a) {
+static void from_json(const json& j, Action& a) {
   j.at("action").get_to(a.action);
   if (j.contains("params")) {
     j.at("params").get_to(a.params);
@@ -38,7 +40,7 @@ struct ActionResizeParams {
   int height;
 };
 
-void from_json(const json& j, ActionResizeParams& a) {
+static void from_json(const json& j, ActionResizeParams& a) {
   if (j.contains("factor")) {
     j.at("factor").get_to(a.factor);
   }
@@ -55,7 +57,7 @@ struct ActionFlipParams {
   int code; // 0 - flipping around the x-axis; Positive value - flipping around y-axis; Negative value - flipping around both axes.
 };
 
-void from_json(const json& j, ActionFlipParams& a) {
+static void from_json(const json& j, ActionFlipParams& a) {
   if (j.contains("code")) {
     j.at("code").get_to(a.code);
   }
@@ -65,7 +67,7 @@ struct ActionCropParams {
   std::vector<int> region;
 };
 
-void from_json(const json& j, ActionCropParams& a) {
+static void from_json(const json& j, ActionCropParams& a) {
   j.at("region").get_to(a.region);
 }
 
@@ -126,7 +128,7 @@ private:
   std::map<std::string, PaddleResource> resources_;
 };
 
-void check_worker_params() {
+static void check_worker_params() {
   if (FLAGS_det_model_dir.empty()) {
     std::cerr << "missing flag det_model_dir" << std::endl;
     exit(1);
@@ -141,7 +143,8 @@ void check_worker_params() {
   }
 }
 
-bool read_image(const std::string& filepath, cv::Mat& dst) {
+static bool read_image(const std::string& filepath, cv::Mat& dst, cv::ImreadModes mode=cv::IMREAD_COLOR) {
+  // cv::imread has problem if filepath is in unicode, so use std fstream to load the image file
   std::wstring_convert<std::codecvt_utf8<wchar_t>> conv;
   std::wstring path = conv.from_bytes(filepath.c_str());
   std::ifstream file(path, std::iostream::binary);
@@ -153,11 +156,11 @@ bool read_image(const std::string& filepath, cv::Mat& dst) {
   file.rdbuf()->pubseekpos(0, file.in);
   std::vector<uchar> buf(length);
   file.rdbuf()->sgetn((char*)buf.data(), length);
-  cv::imdecode(buf, cv::IMREAD_COLOR, &dst);
+  cv::imdecode(buf, mode, &dst);
   return true;
 }
 
-bool write_image(const std::string& filepath, const cv::Mat& src) {
+static bool write_image(const std::string& filepath, const cv::Mat& src) {
   std::wstring_convert<std::codecvt_utf8<wchar_t>> conv;
   std::wstring path = conv.from_bytes(filepath.c_str());
   std::ofstream file(path, std::iostream::binary);
@@ -171,7 +174,7 @@ bool write_image(const std::string& filepath, const cv::Mat& src) {
   return true;
 }
 
-void split(const std::string& s, std::vector<std::string>& sv, const char* delim = " ") {
+static void split(const std::string& s, std::vector<std::string>& sv, const char* delim = " ") {
   sv.clear();
   char* buffer = new char[s.size() + 1];
   buffer[s.size()] = '\0';
@@ -184,7 +187,7 @@ void split(const std::string& s, std::vector<std::string>& sv, const char* delim
 }
 
 #ifdef _WIN32
-cv::Mat captureScreenMat(int x, int y, int width, int height)
+static cv::Mat captureScreenMat(int x, int y, int width, int height)
 {
   // get handles to a device context (DC)
   HWND hwnd = GetDesktopWindow();
@@ -227,7 +230,7 @@ cv::Mat captureScreenMat(int x, int y, int width, int height)
 }
 #endif // _WIN32
 
-void from_json(const json& j, Task& t) {
+static void from_json(const json& j, Task& t) {
   j.at("id").get_to(t.id);
   j.at("command").get_to(t.command);
   if (j.contains("content")) {
@@ -239,7 +242,7 @@ OcrTask::OcrTask()
   : det(true), rec(true), cls(false) {
 }
 
-void from_json(const json& j, OcrTask& t) {
+static void from_json(const json& j, OcrTask& t) {
   j.at("lang").get_to(t.lang);
   if (j.contains("image")) {
     j.at("image").get_to(t.image);
@@ -265,7 +268,7 @@ LocateTask::LocateTask()
   : confidence(0), method(5) {
 }
 
-void from_json(const json& j, LocateTask& t) {
+static void from_json(const json& j, LocateTask& t) {
   j.at("images").get_to(t.images);
   if (j.contains("region")) {
     j.at("region").get_to(t.region);
@@ -290,12 +293,12 @@ void from_json(const json& j, LocateTask& t) {
   }
 }
 
-void from_json(const json& j, PixelTask& t) {
+static void from_json(const json& j, PixelTask& t) {
   j.at("x").get_to(t.x);
   j.at("y").get_to(t.y);
 }
 
-void from_json(const json& j, ScreenshotTask& t) {
+static void from_json(const json& j, ScreenshotTask& t) {
   j.at("region").get_to(t.region);
   j.at("path").get_to(t.path);
 }
@@ -549,17 +552,17 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
       print_result(id, false, "region error");
       return;
     }
-    cv::Mat captured_bgra = captureScreenMat(task.region[0], task.region[1], task.region[2], task.region[3]);
-    if (!captured_bgra.data) {
+    *image = captureScreenMat(task.region[0], task.region[1], task.region[2], task.region[3]);
+    if (!image->data) {
       print_result(id, false, "captured screen without data");
       return;
     }
 
     mode = task.mode.empty() || task.mode == "images_on_screen" ? "images_in_image" : "image_in_images";
-    cv::cvtColor(captured_bgra, *image, cv::COLOR_BGRA2BGR);
+    //cv::cvtColor(captured_bgra, *image, cv::COLOR_BGRA2BGR);
   }
   else {
-    if (!read_image(task.image, *image)) {
+    if (!read_image(task.image, *image, cv::IMREAD_UNCHANGED)) {
       std::cerr << "[ERROR] can't load the image: " << task.image << std::endl;
       print_result(id, false, "failed load image");
       return;
@@ -567,7 +570,7 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
 
     if (!task.region.empty()) {
       if (task.region.size() != 4 || task.region[0] < 0 || task.region[1] < 0 || task.region[2] <= 0 || task.region[3] <= 0) {
-        print_result(id, false, "region value error");
+        print_result(id, false, "region error");
         return;
       }
       if (task.region[0] + task.region[2] > image->cols || task.region[1] + task.region[3] > image->rows) {
@@ -628,42 +631,53 @@ std::shared_ptr<LocateResult> Worker::do_locate(
   int method,
   float confidence
 ) {
+  std::cerr << "calling do_locate" << std::endl;
+
   // TODO support task.grayscale
-  if (mode != "images_in_image" && mode != "image_in_images") {
-    print_result(id, false, "mode error");
-    return nullptr;
-  }
-  if (method != cv::TemplateMatchModes::TM_CCOEFF_NORMED && method != cv::TemplateMatchModes::TM_CCORR_NORMED) {
-    print_result(id, false, "method error");
-    return nullptr;
-  }
 
-  const cv::Mat& final_image = image;
-  std::unique_ptr<cv::Mat> mask_image;
-  if (!mask.empty()) {
-    std::cerr << "loading mask:" << mask << std::endl;
-    std::unique_ptr<cv::Mat> tmp = std::make_unique<cv::Mat>();
-    if (!read_image(mask, *tmp)) {
-      std::cerr << "[ERROR] can't load mask: " << mask << std::endl;
-      print_result(id, false, "can't load mask");
-      return nullptr;
-    }
-    if (mode == "images_in_image") {
-      // mask's size determined by each image in task.images
-      mask_image = std::move(tmp);
-    }
-    else {
-      // mask's size is fixed
-      mask_image = std::make_unique<cv::Mat>();
-      cv::resize(*tmp, *mask_image, cv::Size(final_image.cols, final_image.rows));
-    }
-  }
-
+  // TODO determine thread number by param in task
+  auto match_method = cv::TemplateMatchModes(method);
   std::shared_ptr<LocateResult> loc_result(new LocateResult());
   std::mutex mut;
   std::vector<std::shared_ptr<std::thread>> threads;
   std::size_t running_index = 0;
-  // TODO thread number by param in task
+
+  cv::Mat final_image = image;
+  std::shared_ptr<cv::Mat> mask_image;
+  if (!mask.empty()) {
+    if (mask == ALPHA_CHANNEL) {
+      if (mode == "image_in_images" && image.channels() == 4) {
+        std::cerr << "using alpha channel as mask" << std::endl;
+        cv::Mat alpha_channel;
+        cv::extractChannel(image, alpha_channel, 3);
+        cv::Mat array[3] = { alpha_channel, alpha_channel , alpha_channel };
+        mask_image = std::make_shared<cv::Mat>();
+        cv::merge(array, 3, *mask_image);
+        cv::cvtColor(image, final_image, cv::COLOR_BGRA2BGR);
+
+        cv::imwrite(FLAGS_output + "/rgb.png", final_image);
+        cv::imwrite(FLAGS_output + "/mask.png", *mask_image);
+      }
+    }
+    else {
+      mask_image = std::make_shared<cv::Mat>();
+      if (!read_image(mask, *mask_image, cv::IMREAD_COLOR)) {
+        std::cerr << "[ERROR] can't load the image: " << mask << std::endl;
+        print_result(id, false, "can't load the image");
+        return nullptr;
+      }
+      if (mask_image->cols != image.cols || mask_image->rows != image.rows) {
+        auto resized_mask = std::make_shared<cv::Mat>();
+        cv::resize(*mask_image, *resized_mask, cv::Size(image.cols, image.rows));
+        mask_image = resized_mask;
+      }
+    }
+  }
+
+  if (final_image.channels() == 4) {
+    cv::cvtColor(image, final_image, cv::COLOR_BGRA2BGR);
+  }
+
   for (size_t ti = 0; ti < 4 && ti < images.size(); ti++) {
     std::shared_ptr<std::thread> t(new std::thread([&] {
       while (true) {
@@ -676,38 +690,45 @@ std::shared_ptr<LocateResult> Worker::do_locate(
           image_index = running_index++;
         }
 
-        //std::cerr << "locating " << task.images[image_index] << std::endl;
         cv::Mat indexed_image;
-        if (!read_image(images[image_index], indexed_image)) {
-          std::cerr << "[ERROR] can't load the image: " << images[image_index] << std::endl;
-          print_result(id, false, "can't load the image");
-          return nullptr;
-        }
 
-        // TM_CCORR_NORMED is faster than TM_CCOEFF_NORMED when mask is enabled,
-        // but TM_CCORR_NORMED sometimes is not accurate enough.
-        // TM_CCOEFF_NORMED and TM_CCORR_NORMED range in -1~1, and the best matching is maxLoc.
-        auto match_method = cv::TemplateMatchModes(method);
         cv::Mat result;
         if (mode == "images_in_image") {
+          if (!read_image(images[image_index], indexed_image, mask == ALPHA_CHANNEL ? cv::IMREAD_UNCHANGED : cv::IMREAD_COLOR)) {
+            std::cerr << "[ERROR] can't load the image: " << images[image_index] << std::endl;
+            print_result(id, false, "can't load the image");
+            return nullptr;
+          }
           if (indexed_image.rows > final_image.rows || indexed_image.cols > final_image.cols) {
-            std::cerr << "[ERROR] template's size out of range" << std::endl;
             print_result(id, false, "template's size out of range");
             return nullptr;
           }
-          if (!mask_image) {
-            cv::matchTemplate(final_image, indexed_image, result, match_method);
+          if (mask == ALPHA_CHANNEL && indexed_image.channels() == 4) {
+            std::cerr << "using alpha chanel as mask" << std::endl;
+            cv::Mat alpha_channel;
+            cv::extractChannel(indexed_image, alpha_channel, 3);
+            cv::Mat array[3] = { alpha_channel, alpha_channel , alpha_channel };
+            mask_image = std::make_shared< cv::Mat>();
+            cv::merge(array, 3, *mask_image);
+            cv::cvtColor(indexed_image, indexed_image, cv::COLOR_BGRA2BGR);
+
+            cv::imwrite(FLAGS_output + "/rgb.png", indexed_image);
+            cv::imwrite(FLAGS_output + "/mask.png", *mask_image);
           }
-          else if (mask_image->cols != indexed_image.cols || mask_image->rows != indexed_image.rows) {
-            cv::Mat resized_mask;
-            cv::resize(*mask_image, resized_mask, cv::Size(indexed_image.cols, indexed_image.rows));
-            cv::matchTemplate(final_image, indexed_image, result, match_method, resized_mask);
+          else if (mask_image && (mask_image->cols != indexed_image.cols || mask_image->rows != indexed_image.rows)) {
+            auto resized_mask = std::make_shared<cv::Mat>();
+            cv::resize(*mask_image, *resized_mask, cv::Size(indexed_image.cols, indexed_image.rows));
+            mask_image = resized_mask;
           }
-          else {
-            cv::matchTemplate(final_image, indexed_image, result, match_method, *mask_image);
-          }
+
+          cv::matchTemplate(final_image, indexed_image, result, match_method, mask_image ? *mask_image : cv::noArray());
         }
         else {
+          if (!read_image(images[image_index], indexed_image)) {
+            std::cerr << "[ERROR] can't load the image: " << images[image_index] << std::endl;
+            print_result(id, false, "can't load the image");
+            return nullptr;
+          }
           if (final_image.rows > indexed_image.rows || final_image.cols > indexed_image.cols) {
             std::cerr << "[ERROR] template's size out of range" << std::endl;
             print_result(id, false, "template's size out of range");
