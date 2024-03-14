@@ -18,7 +18,7 @@
 using json = nlohmann::json;
 using namespace PaddleOCR;
 
-static const char* ALPHA_CHANNEL = "alpha_channel";
+static const char* AUTO_MASK = "auto";
 
 struct Action {
   std::string action;
@@ -552,16 +552,17 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
       print_result(id, false, "region error");
       return;
     }
-    *image = captureScreenMat(task.region[0], task.region[1], task.region[2], task.region[3]);
-    if (!image->data) {
+    cv::Mat captured_bgra = captureScreenMat(task.region[0], task.region[1], task.region[2], task.region[3]);
+    if (!captured_bgra.data) {
       print_result(id, false, "captured screen without data");
       return;
     }
 
     mode = task.mode.empty() || task.mode == "images_on_screen" ? "images_in_image" : "image_in_images";
-    //cv::cvtColor(captured_bgra, *image, cv::COLOR_BGRA2BGR);
+    cv::cvtColor(captured_bgra, *image, cv::COLOR_BGRA2BGR); // remove alpha channel in captured image
   }
   else {
+    // keep alpha channel if it exists
     if (!read_image(task.image, *image, cv::IMREAD_UNCHANGED)) {
       std::cerr << "[ERROR] can't load the image: " << task.image << std::endl;
       print_result(id, false, "failed load image");
@@ -645,7 +646,7 @@ std::shared_ptr<LocateResult> Worker::do_locate(
   cv::Mat final_image = image;
   std::shared_ptr<cv::Mat> mask_image;
   if (!mask.empty()) {
-    if (mask == ALPHA_CHANNEL) {
+    if (mask == AUTO_MASK) {
       if (mode == "image_in_images" && image.channels() == 4) {
         std::cerr << "using alpha channel as mask" << std::endl;
         cv::Mat alpha_channel;
@@ -662,8 +663,8 @@ std::shared_ptr<LocateResult> Worker::do_locate(
     else {
       mask_image = std::make_shared<cv::Mat>();
       if (!read_image(mask, *mask_image, cv::IMREAD_COLOR)) {
-        std::cerr << "[ERROR] can't load the image: " << mask << std::endl;
-        print_result(id, false, "can't load the image");
+        std::cerr << "[ERROR] can't load mask: " << mask << std::endl;
+        print_result(id, false, "can't load mask");
         return nullptr;
       }
       if (mask_image->cols != image.cols || mask_image->rows != image.rows) {
@@ -694,7 +695,7 @@ std::shared_ptr<LocateResult> Worker::do_locate(
 
         cv::Mat result;
         if (mode == "images_in_image") {
-          if (!read_image(images[image_index], indexed_image, mask == ALPHA_CHANNEL ? cv::IMREAD_UNCHANGED : cv::IMREAD_COLOR)) {
+          if (!read_image(images[image_index], indexed_image, mask == AUTO_MASK ? cv::IMREAD_UNCHANGED : cv::IMREAD_COLOR)) {
             std::cerr << "[ERROR] can't load the image: " << images[image_index] << std::endl;
             print_result(id, false, "can't load the image");
             return nullptr;
@@ -703,7 +704,7 @@ std::shared_ptr<LocateResult> Worker::do_locate(
             print_result(id, false, "template's size out of range");
             return nullptr;
           }
-          if (mask == ALPHA_CHANNEL && indexed_image.channels() == 4) {
+          if (mask == AUTO_MASK && indexed_image.channels() == 4) {
             std::cerr << "using alpha chanel as mask" << std::endl;
             cv::Mat alpha_channel;
             cv::extractChannel(indexed_image, alpha_channel, 3);
