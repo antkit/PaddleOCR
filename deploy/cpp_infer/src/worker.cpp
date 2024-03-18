@@ -606,9 +606,21 @@ void Worker::do_execute(const std::string& id, const LocateTask& task) {
 
   if (loc_result) {
     if (loc_result->located >= 0 && loc_result->score >= task.confidence) {
-      if (mode == "images_in_image" && !task.region.empty()) {
-        loc_result->region.x += task.region[0];
-        loc_result->region.y += task.region[1];
+      if (mode == "images_in_image") {
+        if (final_image.cols != image->cols) {
+          float scale = float(image->cols) / final_image.cols;
+          loc_result->region.x = std::lround(loc_result->region.x * scale);
+          loc_result->region.width = std::lround(loc_result->region.width * scale);
+        }
+        if (final_image.rows != image->rows) {
+          float scale = float(image->rows) / final_image.rows;
+          loc_result->region.y = std::lround(loc_result->region.y * scale);
+          loc_result->region.height = std::lround(loc_result->region.height * scale);
+        }
+        if (!task.region.empty()) {
+          loc_result->region.x += task.region[0];
+          loc_result->region.y += task.region[1];
+        }
       }
       cv::Rect& rc = loc_result->region;
       json result = { loc_result->located, rc.x, rc.y, rc.width, rc.height, float(loc_result->score) };
