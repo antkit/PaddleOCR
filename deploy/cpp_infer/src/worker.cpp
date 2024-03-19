@@ -529,6 +529,18 @@ void Worker::do_execute(const std::string& id, const OcrTask& task) {
     }
   }
 
+  // make bbox relative to the full image
+  if (!task.image.empty() && !task.region.empty()) {
+    size_t index = 0;
+    for (std::vector<OCRPredictResult>::iterator p = ocr_result.begin(); p != ocr_result.end(); ++p) {
+      for (std::vector<std::vector<int>>::iterator p2 = p->box.begin(); p2 != p->box.end(); ++p2) {
+        std::transform(p2->cbegin(), p2->cend(), p2->begin(), [&](int v) {
+          return v + task.region[index++ % 2];
+          });
+      }
+    }
+  }
+
   print_result(id, true, ocr_result);
 
   if (FLAGS_benchmark) {
